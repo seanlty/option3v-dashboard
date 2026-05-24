@@ -26,6 +26,7 @@ data/raw/*
 data/processed/*
 !data/raw/.gitkeep
 !data/processed/.gitkeep
+!data/settlement_dates.json
 *.parquet
 *.feather
 *.h5

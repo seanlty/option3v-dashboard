@@ -623,6 +623,177 @@ tbody tr:last-child td {
 .calendar-list {
   display: grid;
   gap: 9px;
+  margin-top: 12px;
+}
+
+.settlement-calendar {
+  background: var(--surface-alt);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 12px;
+}
+
+.settlement-calendar-header {
+  align-items: center;
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+
+.settlement-calendar-header strong {
+  display: block;
+  font-size: 14px;
+}
+
+.settlement-calendar-header span {
+  color: var(--muted);
+  display: block;
+  font-size: 12px;
+  margin-top: 2px;
+}
+
+.settlement-countdown {
+  background: #e9f6f1;
+  border: 1px solid #b9e3d4;
+  border-radius: 999px;
+  color: var(--green);
+  font-weight: 800;
+  padding: 5px 9px;
+  white-space: nowrap;
+}
+
+.settlement-months {
+  display: grid;
+  gap: 12px;
+}
+
+.settlement-month {
+  background: #ffffff;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.settlement-month-title {
+  color: var(--ink);
+  font-size: 14px;
+  font-weight: 800;
+  padding: 9px 10px;
+}
+
+.settlement-weekdays,
+.settlement-days {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+}
+
+.settlement-weekdays span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+  padding: 5px 0;
+  text-align: center;
+}
+
+.settlement-day {
+  align-items: center;
+  background: #ffffff;
+  border-right: 1px solid #e5ebf1;
+  border-top: 1px solid #e5ebf1;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  justify-content: center;
+  min-height: 42px;
+  position: relative;
+}
+
+.settlement-day.blank {
+  background: #ffffff;
+  border-top: 1px solid #e5ebf1;
+  min-height: 42px;
+}
+
+.settlement-day:nth-child(7n) {
+  border-right: 0;
+}
+
+.settlement-day strong {
+  font-size: 13px;
+  line-height: 1;
+}
+
+.settlement-day span {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.1;
+}
+
+.settlement-day.in-cycle {
+  box-shadow: inset 0 0 0 1px rgba(15, 143, 102, 0.22);
+}
+
+.settlement-day.weekend {
+  background: #f7f9fb;
+  box-shadow: none;
+}
+
+.settlement-day.weekend span {
+  color: transparent;
+}
+
+.settlement-day.weekend.cycle-end span {
+  color: #2563eb;
+}
+
+.settlement-day.time-p1 {
+  background: #e8f7ef;
+}
+
+.settlement-day.time-p2 {
+  background: #fff1df;
+  box-shadow: inset 0 0 0 1px rgba(245, 158, 11, 0.28);
+}
+
+.settlement-day.time-p3 {
+  background: #ffe8e8;
+  box-shadow: inset 0 0 0 1px rgba(214, 69, 69, 0.32);
+}
+
+.settlement-day.time-p1 span {
+  color: var(--green);
+  font-weight: 800;
+}
+
+.settlement-day.time-p2 span {
+  color: #b7791f;
+  font-weight: 800;
+}
+
+.settlement-day.time-p3 span {
+  color: var(--red);
+  font-weight: 800;
+}
+
+.settlement-day.cycle-start {
+  background: #fff3ec;
+  box-shadow: inset 0 0 0 2px #f97316;
+}
+
+.settlement-day.cycle-end {
+  background: #e9f2ff;
+  box-shadow: inset 0 0 0 2px #2563eb;
+}
+
+.settlement-day.cycle-end span {
+  color: #2563eb;
+  font-weight: 800;
+}
+
+.settlement-day.today {
+  outline: 2px solid #155f7c;
+  outline-offset: -3px;
 }
 
 .calendar-item {

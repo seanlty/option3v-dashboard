@@ -3,19 +3,12 @@ const STORAGE_KEY = "txo-dashboard-positions-v1";
 const FINMIND_URL = "https://api.finmindtrade.com/api/v4/data";
 const KNOWN_TWSE_CLOSED_DATES = new Set(["2026-05-01"]);
 const CHART_PRICE_SCALE_WIDTH = 72;
-const MONTHLY_OPTION_SETTLEMENT_DATES_2026 = [
-  "2026-01-21",
-  "2026-02-23",
-  "2026-03-18",
-  "2026-04-15",
-  "2026-05-20",
-  "2026-06-17",
-  "2026-07-15",
-  "2026-08-19",
-  "2026-09-16",
-  "2026-10-21",
-  "2026-11-18",
-  "2026-12-16",
+const FALLBACK_SETTLEMENT_DATES = [
+  "2022-01-19", "2022-02-16", "2022-03-16", "2022-04-20", "2022-05-18", "2022-06-15", "2022-07-20", "2022-08-17", "2022-09-21", "2022-10-19", "2022-11-16", "2022-12-21",
+  "2023-01-30", "2023-02-15", "2023-03-15", "2023-04-19", "2023-05-17", "2023-06-21", "2023-07-19", "2023-08-16", "2023-09-20", "2023-10-18", "2023-11-15", "2023-12-20",
+  "2024-01-17", "2024-02-21", "2024-03-20", "2024-04-17", "2024-05-15", "2024-06-19", "2024-07-17", "2024-08-21", "2024-09-18", "2024-10-16", "2024-11-20", "2024-12-18",
+  "2025-01-15", "2025-02-19", "2025-03-19", "2025-04-16", "2025-05-21", "2025-06-18", "2025-07-16", "2025-08-20", "2025-09-17", "2025-10-15", "2025-11-19", "2025-12-17",
+  "2026-01-21", "2026-02-23", "2026-03-18", "2026-04-15", "2026-05-20", "2026-06-17", "2026-07-15", "2026-08-19", "2026-09-16", "2026-10-21", "2026-11-18", "2026-12-16",
 ];
 
 const state = {
@@ -38,6 +31,7 @@ const state = {
   candleByTime: new Map(),
   scoreByTime: new Map(),
   scoreDeltaByTime: new Map(),
+  settlementDates: [...FALLBACK_SETTLEMENT_DATES],
   finmindToken: "",
   isFetchingIndex: false,
   strategyFilters: {
@@ -56,6 +50,7 @@ document.addEventListener("DOMContentLoaded", () => {
   seedMarketData();
   bindEvents();
   renderAll();
+  loadSettlementDates().then(renderAll);
   loadEnvToken().then(() => fetchIndexCandles({ auto: true }));
   window.addEventListener("resize", () => {
     drawPayoff();
@@ -90,8 +85,8 @@ function bindElements() {
     fetchOptionsBtn: document.querySelector("#fetchOptionsBtn"),
     optionChainBody: document.querySelector("#optionChainBody"),
     optionStatus: document.querySelector("#optionStatus"),
+    settlementCalendar: document.querySelector("#settlementCalendar"),
     calendarList: document.querySelector("#calendarList"),
-    refreshCalendarBtn: document.querySelector("#refreshCalendarBtn"),
     riskSummary: document.querySelector("#riskSummary"),
     regimeAdvice: document.querySelector("#regimeAdvice"),
     strategyBody: document.querySelector("#strategyBody"),
@@ -123,7 +118,6 @@ function bindEvents() {
   });
   els.fetchIndexBtn.addEventListener("click", fetchIndexCandles);
   els.fetchOptionsBtn.addEventListener("click", fetchOptionDaily);
-  els.refreshCalendarBtn.addEventListener("click", renderCalendar);
   els.positionsBody.addEventListener("click", handlePositionAction);
   els.optionChainBody.addEventListener("click", handleChainAction);
   els.strategyViewFilter.addEventListener("change", handleStrategyFilterChange);
@@ -135,7 +129,7 @@ function bindEvents() {
 function setDefaultDates() {
   const today = new Date();
   const end = toDateInput(today);
-  const start = toDateInput(addDays(today, -90));
+  const start = defaultIndexStartDate(today);
   const nextExpiry = thirdWednesday(today.getFullYear(), today.getMonth());
   const expiry = nextExpiry < stripTime(today)
     ? thirdWednesday(today.getFullYear(), today.getMonth() + 1)
@@ -145,6 +139,36 @@ function setDefaultDates() {
   els.endDateInput.value = end;
   els.optionDateInput.value = end;
   els.positionForm.elements.expiry.value = toDateInput(expiry);
+}
+
+function defaultIndexStartDate(today) {
+  const sixMonthsAgo = new Date(today.getFullYear(), today.getMonth() - 6, today.getDate());
+  const threshold = toDateInput(sixMonthsAgo);
+  return settlementDates().find((date) => date >= threshold)
+    || settlementDates()[0]
+    || threshold;
+}
+
+async function loadSettlementDates() {
+  try {
+    const response = await fetch("data/settlement_dates.json", { cache: "no-store" });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const data = await response.json();
+    const dates = Object.values(data)
+      .flat()
+      .map(normalizeDateValue)
+      .filter(Boolean)
+      .sort();
+    if (dates.length) {
+      state.settlementDates = unique(dates);
+    }
+  } catch (error) {
+    state.settlementDates = [...FALLBACK_SETTLEMENT_DATES];
+  }
+}
+
+function settlementDates() {
+  return state.settlementDates.length ? state.settlementDates : FALLBACK_SETTLEMENT_DATES;
 }
 
 function loadPositions() {
@@ -662,11 +686,12 @@ function settlementMarkerDates() {
   const today = toDateInput(new Date());
   const startDate = els.startDateInput?.value || "";
   const endDate = els.endDateInput?.value || "";
-  const occurredInRange = MONTHLY_OPTION_SETTLEMENT_DATES_2026
+  const dates = settlementDates();
+  const occurredInRange = dates
     .filter((date) => date >= startDate)
     .filter((date) => !endDate || date <= endDate)
     .filter((date) => date <= today);
-  const upcoming = MONTHLY_OPTION_SETTLEMENT_DATES_2026
+  const upcoming = dates
     .filter((date) => date >= startDate)
     .find((date) => date > today);
   return unique(upcoming ? [...occurredInRange, upcoming] : occurredInRange);
@@ -886,12 +911,8 @@ function filteredStrategyRows(rows) {
 
 function renderCalendar() {
   const today = stripTime(new Date());
-  const items = [];
-  for (let offset = 0; offset < 6; offset += 1) {
-    const expiry = thirdWednesday(today.getFullYear(), today.getMonth() + offset);
-    if (expiry < today) continue;
-    items.push(expiry);
-  }
+  renderSettlementCalendar(today);
+  const items = settlementReminderDates(today);
   els.calendarList.innerHTML = items.slice(0, 5).map((date) => {
     const dte = businessDaysBetween(today, date);
     const urgent = dte <= 5 ? "到期警戒" : "正常追蹤";
@@ -903,6 +924,99 @@ function renderCalendar() {
       </div>
     `;
   }).join("");
+}
+
+function renderSettlementCalendar(today) {
+  const todayText = toDateInput(today);
+  const dates = settlementDates();
+  const previousSettlement = [...dates].reverse().find((date) => date <= todayText)
+    || dates[0];
+  const nextSettlement = dates.find((date) => date > todayText)
+    || dates[dates.length - 1];
+  const startDate = parseDate(previousSettlement);
+  const endDate = parseDate(nextSettlement);
+  const months = monthsBetween(startDate, endDate);
+  const contractMonth = settlementContractMonth(nextSettlement);
+
+  els.settlementCalendar.innerHTML = `
+    <div class="settlement-calendar-header">
+      <div>
+        <strong>${contractMonth}</strong>
+        <span>${previousSettlement} ~ ${nextSettlement}</span>
+      </div>
+      <span class="settlement-countdown">剩餘 ${businessDaysBetween(today, endDate)} 個交易日</span>
+    </div>
+    <div class="settlement-months">
+      ${months.map((month) => renderSettlementMonth(month, startDate, endDate, today)).join("")}
+    </div>
+  `;
+}
+
+function renderSettlementMonth(monthDate, startDate, endDate, today) {
+  const monthStart = new Date(monthDate.getFullYear(), monthDate.getMonth(), 1);
+  const monthEnd = new Date(monthDate.getFullYear(), monthDate.getMonth() + 1, 0);
+  const leadingBlanks = Array.from({ length: monthStart.getDay() }, () => null);
+  const monthDays = Array.from({ length: monthEnd.getDate() }, (_, index) => new Date(monthDate.getFullYear(), monthDate.getMonth(), index + 1));
+  const days = [...leadingBlanks, ...monthDays];
+  const weekdayLabels = ["日", "一", "二", "三", "四", "五", "六"];
+
+  return `
+    <div class="settlement-month">
+      <div class="settlement-month-title">${monthDate.getFullYear()}年${monthDate.getMonth() + 1}月</div>
+      <div class="settlement-weekdays">
+        ${weekdayLabels.map((label) => `<span>${label}</span>`).join("")}
+      </div>
+      <div class="settlement-days">
+        ${days.map((date) => date ? renderSettlementDay(date, startDate, endDate, today) : `<div class="settlement-day blank"></div>`).join("")}
+      </div>
+    </div>
+  `;
+}
+
+function renderSettlementDay(date, startDate, endDate, today) {
+  const isStart = sameDate(date, startDate);
+  const isEnd = sameDate(date, endDate);
+  const isToday = sameDate(date, today);
+  const isWeekend = date.getDay() === 0 || date.getDay() === 6;
+  const inCycle = date >= startDate && date <= endDate;
+  const timeValue = inCycle && !isWeekend ? timeValueClass(date, endDate) : "";
+  const classes = [
+    "settlement-day",
+    inCycle ? "in-cycle" : "",
+    isWeekend ? "weekend" : "",
+    timeValue,
+    isStart ? "cycle-start" : "",
+    isEnd ? "cycle-end" : "",
+    isToday ? "today" : "",
+  ].filter(Boolean).join(" ");
+
+  return `
+    <div class="${classes}">
+      <strong>${date.getDate()}</strong>
+      <span>${isEnd ? "結算" : timeValue.replace("time-", "").toUpperCase()}</span>
+    </div>
+  `;
+}
+
+function timeValueClass(date, settlementDate) {
+  const daysToSettlement = calendarDaysBetween(date, settlementDate);
+  if (daysToSettlement >= 0 && daysToSettlement <= 2) return "time-p3";
+  if (daysToSettlement >= 3 && daysToSettlement <= 12) return "time-p2";
+  if (daysToSettlement >= 13) return "time-p1";
+  return "";
+}
+
+function settlementReminderDates(today) {
+  const todayText = toDateInput(today);
+  return settlementDates()
+    .filter((date) => date >= todayText)
+    .map(parseDate)
+    .filter(Boolean)
+    .slice(0, 2);
+}
+
+function settlementContractMonth(settlementDate) {
+  return `${settlementDate.slice(0, 4)}-${settlementDate.slice(5, 7)}月選`;
 }
 
 function renderRiskAndAdvice() {
@@ -1504,6 +1618,21 @@ function addDays(date, days) {
   const next = new Date(date);
   next.setDate(next.getDate() + days);
   return next;
+}
+
+function monthsBetween(start, end) {
+  const months = [];
+  const cursor = new Date(start.getFullYear(), start.getMonth(), 1);
+  const last = new Date(end.getFullYear(), end.getMonth(), 1);
+  while (cursor <= last) {
+    months.push(new Date(cursor));
+    cursor.setMonth(cursor.getMonth() + 1);
+  }
+  return months;
+}
+
+function sameDate(a, b) {
+  return a && b && toDateInput(a) === toDateInput(b);
 }
 
 function parseDate(value) {
