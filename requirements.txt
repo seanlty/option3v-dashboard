@@ -1,0 +1,7 @@
+FinMind
+numpy
+pandas
+python-dotenv
+requests
+scipy
+pytest

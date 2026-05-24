@@ -1,0 +1,285 @@
+<!doctype html>
+<html lang="zh-Hant">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>OP3V月選擇權部位監控</title>
+    <link rel="stylesheet" href="styles.css" />
+    <script src="https://unpkg.com/lightweight-charts@5/dist/lightweight-charts.standalone.production.js" defer></script>
+    <script src="app.js" defer></script>
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">TXO Monthly Options Monitor</p>
+          <h1>OP3V月選擇權部位監控</h1>
+        </div>
+        <div class="market-strip" aria-label="風險摘要">
+          <div>
+            <span>現貨</span>
+            <strong id="spotReadout">22,600</strong>
+          </div>
+          <div>
+            <span>淨 Delta</span>
+            <strong id="deltaReadout">--</strong>
+          </div>
+          <div>
+            <span>總損益</span>
+            <strong id="pnlReadout">--</strong>
+          </div>
+          <div>
+            <span>最近到期</span>
+            <strong id="expiryReadout">--</strong>
+          </div>
+        </div>
+      </header>
+
+      <main class="dashboard-grid">
+        <section class="panel positions-panel">
+          <div class="panel-header">
+            <div>
+              <h2>部位明細</h2>
+              <p>實際與模擬部位會一起進入 payoff 與 Greeks 計算。</p>
+            </div>
+            <div class="segmented" role="group" aria-label="部位篩選">
+              <button type="button" class="active" data-filter="all">全部</button>
+              <button type="button" data-filter="live">實際</button>
+              <button type="button" data-filter="sim">模擬</button>
+            </div>
+          </div>
+
+          <form id="positionForm" class="position-form">
+            <label>
+              <span>類型</span>
+              <select name="kind">
+                <option value="sim">模擬</option>
+                <option value="live">實際</option>
+              </select>
+            </label>
+            <label>
+              <span>Call/Put</span>
+              <select name="type">
+                <option value="call">Call</option>
+                <option value="put">Put</option>
+              </select>
+            </label>
+            <label>
+              <span>買賣</span>
+              <select name="side">
+                <option value="long">買進</option>
+                <option value="short">賣出</option>
+              </select>
+            </label>
+            <label>
+              <span>履約價</span>
+              <input name="strike" type="number" inputmode="numeric" min="1" step="50" value="22600" />
+            </label>
+            <label>
+              <span>口數</span>
+              <input name="qty" type="number" inputmode="numeric" min="1" step="1" value="1" />
+            </label>
+            <label>
+              <span>權利金</span>
+              <input name="premium" type="number" inputmode="decimal" min="0" step="0.1" value="120" />
+            </label>
+            <label>
+              <span>市價</span>
+              <input name="market" type="number" inputmode="decimal" min="0" step="0.1" value="130" />
+            </label>
+            <label>
+              <span>到期日</span>
+              <input name="expiry" type="date" />
+            </label>
+            <button id="addPositionBtn" type="button" class="primary-action">新增部位</button>
+          </form>
+
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>類型</th>
+                  <th>契約</th>
+                  <th>買賣</th>
+                  <th>口數</th>
+                  <th>權利金</th>
+                  <th>市價</th>
+                  <th>損益</th>
+                  <th>Delta</th>
+                  <th>Gamma</th>
+                  <th>Theta</th>
+                  <th>Vega</th>
+                  <th>IV</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody id="positionsBody"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="panel payoff-panel">
+          <div class="panel-header">
+            <div>
+              <h2>總部位 Payoff</h2>
+              <p>到期損益曲線、理論損益曲線與兩平點。</p>
+            </div>
+            <label class="compact-field">
+              <span>現貨指數</span>
+              <input id="spotInput" type="number" inputmode="decimal" min="1" step="1" value="22600" />
+            </label>
+          </div>
+          <canvas id="payoffCanvas" width="920" height="420" aria-label="選擇權總部位 payoff 圖"></canvas>
+          <div id="payoffStats" class="stat-grid"></div>
+        </section>
+
+        <section class="panel market-panel">
+          <div class="panel-header">
+            <div>
+              <h2>加權指數日線</h2>
+              <p>歷史資料使用日線端點；最新交易日再用 TAIEX 五秒資料重建當日 K。</p>
+            </div>
+            <span class="provider-note">Chart by TradingView Lightweight Charts</span>
+          </div>
+          <div class="data-controls">
+            <label>
+              <span>開始日</span>
+              <input id="startDateInput" type="date" />
+            </label>
+            <label>
+              <span>結束日</span>
+              <input id="endDateInput" type="date" />
+            </label>
+            <button id="fetchIndexBtn" type="button" class="secondary-action">抓取日線</button>
+          </div>
+          <div id="indexChart" class="chart-stack">
+            <div id="priceChart" class="chart-area chart-main"></div>
+            <div id="eventLane" class="event-lane" aria-label="圖表事件列"></div>
+            <div class="score-chart-shell">
+              <div class="score-chart-title">OP Score 每日評分</div>
+              <div id="scoreChart" class="chart-area chart-score"></div>
+            </div>
+            <div class="score-chart-shell">
+              <div class="score-chart-title">OP Score 日變化</div>
+              <div id="scoreDeltaChart" class="chart-area chart-score chart-delta"></div>
+            </div>
+          </div>
+          <p id="marketStatus" class="status-line">尚未連線 FinMind，先顯示示範日線。</p>
+        </section>
+
+        <section class="panel option-chain-panel">
+          <div class="panel-header">
+            <div>
+              <h2>選擇權日資料與 IV 監控</h2>
+              <p>以 `TaiwanOptionDaily` 更新選擇權鏈，並估算 IV 與偏斜。</p>
+            </div>
+            <button id="fetchOptionsBtn" type="button" class="secondary-action">抓取選擇權</button>
+          </div>
+          <div class="data-controls slim">
+            <label>
+              <span>交易日</span>
+              <input id="optionDateInput" type="date" />
+            </label>
+            <label>
+              <span>到期月</span>
+              <input id="contractInput" type="text" placeholder="例如 202406 或留空" />
+            </label>
+            <label>
+              <span>利率</span>
+              <input id="rateInput" type="number" inputmode="decimal" step="0.001" value="0.015" />
+            </label>
+          </div>
+          <div class="table-wrap compact-table">
+            <table>
+              <thead>
+                <tr>
+                  <th>履約價</th>
+                  <th>Call</th>
+                  <th>Call IV</th>
+                  <th>Put</th>
+                  <th>Put IV</th>
+                  <th>Skew</th>
+                  <th>量</th>
+                  <th>OI</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody id="optionChainBody"></tbody>
+            </table>
+          </div>
+          <p id="optionStatus" class="status-line">尚未連線 FinMind，先顯示示範選擇權鏈。</p>
+        </section>
+
+        <section class="panel strategy-panel">
+          <div class="panel-header">
+            <div>
+              <h2>3V策略表</h2>
+              <p>View 方向、Volatility 波動率、Time-Value 時間價值。</p>
+            </div>
+          </div>
+          <div class="strategy-filters">
+            <label>
+              <span>View 方向</span>
+              <select id="strategyViewFilter">
+                <option value="all">全部方向</option>
+              </select>
+            </label>
+            <label>
+              <span>Volatility 波動率</span>
+              <select id="strategyVolFilter">
+                <option value="all">全部波動率</option>
+              </select>
+            </label>
+            <label>
+              <span>Time-Value 時間價值</span>
+              <select id="strategyTimeFilter">
+                <option value="all">全部時間價值</option>
+              </select>
+            </label>
+          </div>
+          <p id="strategyStatus" class="status-line"></p>
+          <div class="table-wrap strategy-table-wrap">
+            <table class="strategy-table">
+              <thead>
+                <tr>
+                  <th>編號</th>
+                  <th>盤勢</th>
+                  <th>波動率</th>
+                  <th>到期效應</th>
+                  <th>方向</th>
+                  <th>波動率</th>
+                  <th>時間</th>
+                  <th>交易策略</th>
+                  <th>價差型策略</th>
+                </tr>
+              </thead>
+              <tbody id="strategyBody"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="panel calendar-panel">
+          <div class="panel-header">
+            <div>
+              <h2>交易行事曆</h2>
+              <p>月選擇權到期提醒與剩餘交易日。</p>
+            </div>
+            <button id="refreshCalendarBtn" type="button" class="secondary-action">更新提醒</button>
+          </div>
+          <div id="calendarList" class="calendar-list"></div>
+        </section>
+
+        <section class="panel regime-panel">
+          <div class="panel-header">
+            <div>
+              <h2>盤勢判別建議</h2>
+              <p>根據趨勢、波動率、偏斜與部位 Greeks 給出輔助判斷。</p>
+            </div>
+          </div>
+          <div id="riskSummary" class="risk-summary"></div>
+          <div id="regimeAdvice" class="advice-box"></div>
+        </section>
+      </main>
+    </div>
+  </body>
+</html>
