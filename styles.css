@@ -215,7 +215,7 @@ label span {
 .position-form,
 .data-controls {
   display: grid;
-  grid-template-columns: repeat(8, minmax(86px, 1fr));
+  grid-template-columns: repeat(9, minmax(86px, 1fr));
   gap: 10px;
   margin-bottom: 14px;
 }

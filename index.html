@@ -51,17 +51,32 @@
 
           <form id="positionForm" class="position-form">
             <label>
+              <span>商品類型</span>
+              <select name="instrument">
+                <option value="option">選擇權</option>
+                <option value="future">期貨</option>
+              </select>
+            </label>
+            <label>
               <span>類型</span>
               <select name="kind">
                 <option value="sim">模擬</option>
                 <option value="live">實際</option>
               </select>
             </label>
-            <label>
+            <label class="option-only">
               <span>Call/Put</span>
               <select name="type">
                 <option value="call">Call</option>
                 <option value="put">Put</option>
+              </select>
+            </label>
+            <label class="future-only" hidden>
+              <span>期貨商品</span>
+              <select name="futureProduct">
+                <option value="TXF">大台 TXF</option>
+                <option value="MXF">小台 MXF</option>
+                <option value="TMF">微台 TMF</option>
               </select>
             </label>
             <label>
@@ -71,7 +86,7 @@
                 <option value="short">賣出</option>
               </select>
             </label>
-            <label>
+            <label class="option-only">
               <span>履約價</span>
               <input name="strike" type="number" inputmode="numeric" min="1" step="50" value="22600" />
             </label>
@@ -80,11 +95,11 @@
               <input name="qty" type="number" inputmode="numeric" min="1" step="1" value="1" />
             </label>
             <label>
-              <span>權利金</span>
+              <span id="entryPriceLabel">權利金</span>
               <input name="premium" type="number" inputmode="decimal" min="0" step="0.1" value="120" />
             </label>
             <label>
-              <span>到期日</span>
+              <span id="expiryLabel">到期日</span>
               <input name="expiry" type="date" />
             </label>
             <button id="addPositionBtn" type="button" class="primary-action">新增部位</button>
@@ -98,7 +113,7 @@
                   <th>契約</th>
                   <th>買賣</th>
                   <th>口數</th>
-                  <th>權利金</th>
+                  <th>建倉價</th>
                   <th>市價</th>
                   <th>損益</th>
                   <th>Delta</th>

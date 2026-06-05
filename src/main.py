@@ -17,6 +17,8 @@ import requests
 ROOT = Path(__file__).resolve().parents[1]
 FINMIND_API_BASE = "https://api.finmindtrade.com/api/v4"
 QUOTE_REFRESH_SECONDS = 30
+FUTURES_DATA_IDS = ("TXF", "MXF", "MTX", "TMF")
+TAIEX_DATA_ID = "TAIEX"
 
 
 def load_env_token() -> str:
@@ -70,9 +72,10 @@ class QuoteCache:
         if not self.refresh_lock.acquire(blocking=False):
             return self.snapshot()
         try:
-            futures = self._fetch_snapshot("taiwan_futures_snapshot", {"data_id": "TXF"})
+            futures, futures_error = self._fetch_futures_snapshots()
             options = self._fetch_snapshot("taiwan_options_snapshot", {"data_id": "TXO"})
             index, index_error = self._fetch_optional_snapshot("taiwan_stock_tick_snapshot", {"data_id": "001"})
+            error = "；".join(filter(None, [futures_error, index_error]))
             payload = {
                 "ok": True,
                 "updated_at": utc_now(),
@@ -80,7 +83,7 @@ class QuoteCache:
                 "futures": futures,
                 "options": options,
                 "index": index,
-                "error": index_error,
+                "error": error,
             }
         except Exception as error:  # noqa: BLE001 - keep the cache endpoint resilient.
             previous = self.snapshot()
@@ -102,6 +105,12 @@ class QuoteCache:
             self.stop_event.wait(self.refresh_seconds)
 
     def _fetch_snapshot(self, endpoint: str, params: dict[str, str]) -> list[dict[str, Any]]:
+        return self._fetch_api(endpoint, params)
+
+    def _fetch_data(self, dataset: str, params: dict[str, str]) -> list[dict[str, Any]]:
+        return self._fetch_api("data", {"dataset": dataset, **params})
+
+    def _fetch_api(self, endpoint: str, params: dict[str, str]) -> list[dict[str, Any]]:
         url = f"{FINMIND_API_BASE}/{endpoint}"
         request_params = dict(params)
         headers = {}
@@ -119,6 +128,53 @@ class QuoteCache:
             raise RuntimeError(f"{endpoint} 回傳格式不是 list。")
         return data
 
+    def fetch_index_candles(self, start_date: str, end_date: str) -> dict[str, Any]:
+        trading_dates = self._fetch_data(
+            "TaiwanStockTradingDate",
+            {"start_date": start_date, "end_date": end_date},
+        )
+        daily_candles = self._fetch_data(
+            "TaiwanStockPrice",
+            {"data_id": TAIEX_DATA_ID, "start_date": start_date, "end_date": end_date},
+        )
+        latest_date = latest_trading_date(trading_dates, start_date, end_date)
+        latest_rows: list[dict[str, Any]] = []
+        latest_error = ""
+        if latest_date:
+            try:
+                latest_rows = self._fetch_data("TaiwanVariousIndicators5Seconds", {"start_date": latest_date})
+            except Exception as error:  # noqa: BLE001 - historical OHLC can still render without intraday rows.
+                latest_error = sanitize_error(error)
+
+        return {
+            "ok": True,
+            "start_date": start_date,
+            "end_date": end_date,
+            "latest_date": latest_date,
+            "trading_dates": trading_dates,
+            "daily_candles": daily_candles,
+            "latest_rows": latest_rows,
+            "latest_error": latest_error,
+        }
+
+    def _fetch_futures_snapshots(self) -> tuple[list[dict[str, Any]], str]:
+        rows: list[dict[str, Any]] = []
+        warnings: list[str] = []
+        try:
+            all_rows = self._fetch_snapshot("taiwan_futures_snapshot", {"data_id": ""})
+            if all_rows:
+                return dedupe_futures_rows(all_rows), ""
+        except Exception as error:  # noqa: BLE001 - fall back to targeted futures requests.
+            pass
+        for data_id in FUTURES_DATA_IDS:
+            try:
+                rows.extend(self._fetch_snapshot("taiwan_futures_snapshot", {"data_id": data_id}))
+            except Exception as error:  # noqa: BLE001 - non-TXF products should not block the cache.
+                if data_id == "TXF" and not rows:
+                    raise
+                warnings.append(f"{data_id}: {sanitize_error(error)}")
+        return rows, "；".join(warnings)
+
     def _fetch_optional_snapshot(self, endpoint: str, params: dict[str, str]) -> tuple[list[dict[str, Any]], str]:
         try:
             return self._fetch_snapshot(endpoint, params), ""
@@ -135,6 +191,39 @@ def sanitize_error(error: Exception) -> str:
     return text
 
 
+def dedupe_futures_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    deduped: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        futures_id = str(row.get("futures_id") or "")
+        if futures_id:
+            deduped[futures_id] = row
+    return list(deduped.values())
+
+
+def is_iso_date(value: str) -> bool:
+    try:
+        datetime.strptime(value, "%Y-%m-%d")
+    except ValueError:
+        return False
+    return True
+
+
+def normalize_date_text(value: Any) -> str:
+    return str(value or "")[:10].replace("/", "-")
+
+
+def latest_trading_date(rows: list[dict[str, Any]], start_date: str, end_date: str) -> str:
+    dates = sorted(
+        {
+            date
+            for row in rows
+            if (date := normalize_date_text(row.get("date") or row.get("trading_date") or row.get("stock_date")))
+            and start_date <= date <= end_date
+        },
+    )
+    return dates[-1] if dates else ""
+
+
 QUOTE_CACHE = QuoteCache(load_env_token())
 
 
@@ -149,6 +238,18 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             force = query.get("force", ["0"])[0] == "1"
             payload = QUOTE_CACHE.refresh() if force or not QUOTE_CACHE.snapshot().get("updated_at") else QUOTE_CACHE.snapshot()
             self._send_json(payload)
+            return
+        if parsed.path == "/api/index-candles":
+            query = parse_qs(parsed.query)
+            start_date = query.get("start_date", [""])[0]
+            end_date = query.get("end_date", [""])[0]
+            if not is_iso_date(start_date) or not is_iso_date(end_date):
+                self._send_json({"ok": False, "error": "start_date 與 end_date 必須是 YYYY-MM-DD。"})
+                return
+            try:
+                self._send_json(QUOTE_CACHE.fetch_index_candles(start_date, end_date))
+            except Exception as error:  # noqa: BLE001 - return a frontend-friendly JSON error.
+                self._send_json({"ok": False, "error": sanitize_error(error)})
             return
         if parsed.path == "/.env":
             self.send_error(404)

@@ -4,6 +4,14 @@ const FINMIND_URL = "https://api.finmindtrade.com/api/v4/data";
 const T_QUOTE_STRIKE_RANGE = 5000;
 const SAMPLE_MONTHLY_STRIKE_STEP = 100;
 const QUOTE_POLL_MS = 5000;
+const FUTURE_SPECS = {
+  TXF: { label: "大台 TXF", multiplier: 200, aliases: ["TXF"] },
+  MXF: { label: "小台 MXF", multiplier: 50, aliases: ["MXF", "MTX"] },
+  TMF: { label: "微台 TMF", multiplier: 10, aliases: ["TMF"] },
+};
+const FUTURE_ALIAS_TO_PRODUCT = Object.fromEntries(
+  Object.entries(FUTURE_SPECS).flatMap(([product, spec]) => spec.aliases.map((alias) => [alias, product])),
+);
 const KNOWN_TWSE_CLOSED_DATES = new Set(["2026-05-01"]);
 const CHART_PRICE_SCALE_WIDTH = 72;
 const FALLBACK_SETTLEMENT_DATES = [
@@ -23,6 +31,7 @@ const state = {
   optionChain: [],
   automationPositions: [],
   futuresQuote: null,
+  futuresQuotes: [],
   indexQuote: null,
   indexChart: null,
   scoreChart: null,
@@ -72,6 +81,8 @@ function bindElements() {
   Object.assign(els, {
     positionForm: document.querySelector("#positionForm"),
     addPositionBtn: document.querySelector("#addPositionBtn"),
+    entryPriceLabel: document.querySelector("#entryPriceLabel"),
+    expiryLabel: document.querySelector("#expiryLabel"),
     positionsBody: document.querySelector("#positionsBody"),
     spotInput: document.querySelector("#spotInput"),
     spotReadout: document.querySelector("#spotReadout"),
@@ -113,6 +124,8 @@ function bindElements() {
 function bindEvents() {
   els.positionForm.addEventListener("submit", handleAddPosition);
   els.addPositionBtn.addEventListener("click", handleAddPosition);
+  els.positionForm.elements.instrument.addEventListener("change", updatePositionFormMode);
+  updatePositionFormMode();
   els.spotInput?.addEventListener("input", () => {
     state.spot = number(els.spotInput.value, state.spot);
     renderAll();
@@ -258,21 +271,46 @@ function renderAll() {
   renderRiskAndAdvice();
 }
 
+function updatePositionFormMode() {
+  const instrument = els.positionForm.elements.instrument.value || "option";
+  const isFuture = instrument === "future";
+  document.querySelectorAll(".option-only").forEach((element) => {
+    element.hidden = isFuture;
+    element.querySelectorAll("input, select").forEach((control) => { control.disabled = isFuture; });
+  });
+  document.querySelectorAll(".future-only").forEach((element) => {
+    element.hidden = !isFuture;
+    element.querySelectorAll("input, select").forEach((control) => { control.disabled = !isFuture; });
+  });
+  if (els.entryPriceLabel) els.entryPriceLabel.textContent = isFuture ? "建倉價" : "權利金";
+  if (els.expiryLabel) els.expiryLabel.textContent = isFuture ? "到期月" : "到期日";
+}
+
 function handleAddPosition(event) {
   event.preventDefault();
   const form = new FormData(els.positionForm);
+  const instrument = form.get("instrument") || "option";
   const expiry = form.get("expiry");
-  const position = {
+  const base = {
     id: makeId(),
     kind: form.get("kind"),
-    type: form.get("type"),
+    instrument,
     side: form.get("side"),
-    strike: number(form.get("strike"), 0),
     qty: Math.max(1, number(form.get("qty"), 1)),
     premium: Math.max(0, number(form.get("premium"), 0)),
     contract: expiryToContract(expiry),
     expiry,
   };
+  const position = instrument === "future"
+    ? {
+        ...base,
+        product: normalizeFutureProduct(form.get("futureProduct")),
+      }
+    : {
+        ...base,
+        type: form.get("type"),
+        strike: number(form.get("strike"), 0),
+      };
   state.positions.push(position);
   const synced = syncPositionMarketPrices();
   savePositions();
@@ -338,10 +376,10 @@ function renderPositions() {
         <td title="${marketTitle}">${formatQuote(metrics.market)}</td>
         <td class="${pnlClass}">${formatMoney(metrics.pnl)}</td>
         <td>${formatNumber(metrics.delta, 2)}</td>
-        <td>${formatNumber(metrics.gamma, 3)}</td>
-        <td>${formatMoney(metrics.theta)}</td>
-        <td>${formatMoney(metrics.vega)}</td>
-        <td>${formatPercent(metrics.iv)}</td>
+        <td>${formatNullableNumber(metrics.gamma, 3)}</td>
+        <td>${formatNullableMoney(metrics.theta)}</td>
+        <td>${formatNullableMoney(metrics.vega)}</td>
+        <td>${formatNullablePercent(metrics.iv)}</td>
         <td>
           <button type="button" class="ghost-action" data-action="copy" data-id="${position.id}" title="複製為模擬">複製</button>
           <button type="button" class="danger-action" data-action="delete" data-id="${position.id}" title="刪除">刪除</button>
@@ -533,9 +571,9 @@ function renderPayoffStats(points) {
   const extremes = expiryPayoffExtremes();
   const breakevens = findBreakevens(points);
   const atSpot = portfolioPayoff(state.spot);
-  const strikeLevels = positionStrikeLevels();
-  const strikeRange = strikeLevels.length
-    ? `${formatNumber(strikeLevels[0], 0)} - ${formatNumber(strikeLevels.at(-1), 0)} / ${strikeLevels.length} 檔`
+  const priceLevels = positionPriceLevels();
+  const strikeRange = priceLevels.length
+    ? `${formatNumber(priceLevels[0], 0)} - ${formatNumber(priceLevels.at(-1), 0)} / ${priceLevels.length} 檔`
     : "無部位";
   const maxProfitText = extremes.maxProfit === Infinity ? "無上限" : formatMoney(extremes.maxProfit);
   const maxLossText = extremes.maxLoss === -Infinity ? "無下限" : formatMoney(extremes.maxLoss);
@@ -544,7 +582,7 @@ function renderPayoffStats(points) {
     ["最大利潤", maxProfitText, "positive"],
     ["最大損失", maxLossText, "negative"],
     ["兩平點", breakevens.length ? breakevens.map((item) => formatNumber(item, 0)).join(" / ") : "無", ""],
-    ["履約價範圍", strikeRange, ""],
+    ["履約/建倉價範圍", strikeRange, ""],
     ["到期損益區間", `${maxLossText} ~ ${maxProfitText}`, ""],
   ].map(([label, value, className]) => `
     <div class="stat-card">
@@ -1207,12 +1245,34 @@ async function fetchIndexCandles(options = {}) {
   state.isFetchingIndex = true;
   els.fetchIndexBtn.disabled = true;
   try {
-    els.marketStatus.textContent = "正在讀取台股交易日曆...";
-    const tradingDates = await fetchTradingDates(startDate, endDate);
+    els.marketStatus.textContent = "正在透過本機 FinMind token 讀取加權指數日線...";
+    let sourceLabel = "本機 FinMind token";
+    let latestRows = [];
+    let latestFetchError = "";
+    let tradingDates = [];
+    let historicalCandles = [];
+    try {
+      const localPayload = await localIndexCandleData(startDate, endDate);
+      tradingDates = normalizeTradingDateRows(localPayload.trading_dates || [], startDate, endDate);
+      historicalCandles = normalizeDailyCandles(localPayload.daily_candles || []);
+      latestRows = Array.isArray(localPayload.latest_rows) ? localPayload.latest_rows : [];
+      latestFetchError = localPayload.latest_error || "";
+    } catch (localError) {
+      sourceLabel = "FinMind";
+      latestFetchError = localError.message || String(localError);
+      els.marketStatus.textContent = "本機日線 API 無法使用，改用 FinMind 直接端點讀取交易日曆...";
+      tradingDates = await fetchTradingDates(startDate, endDate);
+      els.marketStatus.textContent = "正在使用加權指數日資料端點抓取歷史 OHLC...";
+      historicalCandles = await fetchTaiexDailyCandles(startDate, endDate);
+    }
+
+    if (!tradingDates.length && historicalCandles.length) {
+      tradingDates = unique(historicalCandles.map((candle) => candle.time))
+        .filter((date) => date >= startDate && date <= endDate)
+        .sort();
+    }
     if (!tradingDates.length) throw new Error("指定區間沒有交易日。");
 
-    els.marketStatus.textContent = "正在使用加權指數日資料端點抓取歷史 OHLC...";
-    const historicalCandles = await fetchTaiexDailyCandles(startDate, endDate);
     const tradingDateSet = new Set(tradingDates);
     const candlesByDate = new Map(
       historicalCandles
@@ -1221,25 +1281,39 @@ async function fetchIndexCandles(options = {}) {
     );
 
     const latestTradingDate = tradingDates[tradingDates.length - 1];
-    els.marketStatus.textContent = `正在用五秒資料 resample 最新交易日 ${latestTradingDate}...`;
-    const latestRows = await finmindData("TaiwanVariousIndicators5Seconds", { start_date: latestTradingDate });
+    if (!latestRows.length) {
+      els.marketStatus.textContent = `正在用五秒資料 resample 最新交易日 ${latestTradingDate}...`;
+      try {
+        latestRows = await finmindData("TaiwanVariousIndicators5Seconds", { start_date: latestTradingDate });
+        latestFetchError = "";
+      } catch (error) {
+        latestFetchError = error.message || String(error);
+      }
+    }
     const latestCandle = aggregateTaiexRows(latestRows, latestTradingDate);
     if (latestCandle && tradingDateSet.has(latestCandle.time)) {
       candlesByDate.set(latestCandle.time, latestCandle);
     }
 
-    const candles = tradingDates
+    const mergedCandles = tradingDates
       .map((date) => candlesByDate.get(date))
-      .filter(Boolean)
-      .slice(-90);
-    const droppedCount = tradingDates.length - candles.length;
+      .filter(Boolean);
+    const droppedCount = tradingDates.length - mergedCandles.length;
+    const candles = mergedCandles.slice(-90);
 
     if (!candles.length) throw new Error("查無 TAIEX 資料，可能是假日、權限或請求額度限制。");
     state.indexCandles = candles;
-    setSpot(candles[candles.length - 1].close, latestCandle ? `FinMind 加權指數五秒重建 ${latestTradingDate}` : `FinMind 加權指數收盤價 ${latestTradingDate}`);
+    const lastCandle = candles[candles.length - 1];
+    const spotSource = latestCandle && lastCandle.time === latestCandle.time
+      ? `${sourceLabel} 加權指數五秒重建 ${latestCandle.time}`
+      : `${sourceLabel} 加權指數收盤價 ${lastCandle.time}`;
+    setSpot(lastCandle.close, spotSource);
     const droppedText = droppedCount > 0 ? `，已略過 ${droppedCount} 個無日資料交易日` : "";
-    const latestText = latestCandle ? `，最新交易日 ${latestTradingDate} 已用五秒資料重建` : `，最新交易日 ${latestTradingDate} 沒有五秒資料，保留日資料`;
-    els.marketStatus.textContent = `已更新 ${candles.length} 根加權指數日線${droppedText}${latestText}。`;
+    const latestText = latestCandle
+      ? `，最新交易日 ${latestTradingDate} 已用五秒資料重建`
+      : `，最新交易日 ${latestTradingDate} 沒有可用五秒資料，保留日資料`;
+    const latestWarning = !latestCandle && latestFetchError ? `；五秒資料警告：${latestFetchError}` : "";
+    els.marketStatus.textContent = `已更新 ${candles.length} 根加權指數日線（${sourceLabel}）${droppedText}${latestText}${latestWarning}。`;
     renderAll();
   } catch (error) {
     const fallbackText = options.auto ? "，目前保留示範日線" : "";
@@ -1250,8 +1324,40 @@ async function fetchIndexCandles(options = {}) {
   }
 }
 
+async function localIndexCandleData(startDate, endDate) {
+  const urls = [
+    new URL("/api/index-candles", window.location.origin),
+    new URL("http://127.0.0.1:8766/api/index-candles"),
+  ];
+  urls.forEach((url) => {
+    url.searchParams.set("start_date", startDate);
+    url.searchParams.set("end_date", endDate);
+  });
+
+  let lastError = null;
+  for (const url of urls) {
+    try {
+      const response = await fetch(url, { cache: "no-store" });
+      if (!response?.ok) {
+        lastError = new Error(`HTTP ${response?.status || "unknown"}`);
+        continue;
+      }
+      const payload = await response.json();
+      if (payload.ok) return payload;
+      lastError = new Error(payload.error || "本機 index API 回傳失敗。");
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  throw lastError || new Error("本機 index API 未啟動。");
+}
+
 async function fetchTradingDates(startDate, endDate) {
   const rows = await finmindData("TaiwanStockTradingDate", { start_date: startDate, end_date: endDate });
+  return normalizeTradingDateRows(rows, startDate, endDate);
+}
+
+function normalizeTradingDateRows(rows, startDate, endDate) {
   const dates = rows
     .map((row) => normalizeDateValue(row.date || row.trading_date || row.stock_date))
     .filter((date) => date && date >= startDate && date <= endDate)
@@ -1264,16 +1370,12 @@ async function fetchTaiexDailyCandles(startDate, endDate) {
   const attempts = [
     { dataset: "TaiwanStockPrice", params: { data_id: "TAIEX", start_date: startDate, end_date: endDate } },
     { dataset: "TaiwanStockPrice", params: { stock_id: "TAIEX", start_date: startDate, end_date: endDate } },
-    { dataset: "TaiwanStockTotalReturnIndex", params: { data_id: "TAIEX", start_date: startDate, end_date: endDate } },
   ];
 
   for (const attempt of attempts) {
     try {
       const rows = await finmindData(attempt.dataset, attempt.params);
-      const candles = rows
-        .map(normalizeDailyCandle)
-        .filter(Boolean)
-        .sort((a, b) => a.time.localeCompare(b.time));
+      const candles = normalizeDailyCandles(rows);
       if (candles.length) return candles;
     } catch (error) {
       // Try the next compatible daily endpoint shape.
@@ -1281,6 +1383,13 @@ async function fetchTaiexDailyCandles(startDate, endDate) {
   }
 
   throw new Error("加權指數日資料端點查無資料。");
+}
+
+function normalizeDailyCandles(rows) {
+  return rows
+    .map(normalizeDailyCandle)
+    .filter(Boolean)
+    .sort((a, b) => a.time.localeCompare(b.time));
 }
 
 async function fetchRealtimeQuotes(options = {}) {
@@ -1293,7 +1402,8 @@ async function fetchRealtimeQuotes(options = {}) {
   }
   try {
     const payload = await localQuoteCache({ force: !options.auto && !options.refresh });
-    const futuresQuote = selectFrontMonthFuture((payload.futures || []).map(normalizeFuturesSnapshotRow).filter(Boolean));
+    const futuresRows = (payload.futures || []).map(normalizeFuturesSnapshotRow).filter(Boolean);
+    const futuresQuote = selectFrontMonthFuture(futuresRows, "TXF");
     if (!futuresQuote) throw new Error("查無近月台指期貨 snapshot。");
     const indexQuote = selectIndexQuote((payload.index || []).map(normalizeIndexSnapshotRow).filter(Boolean));
     const filtered = (payload.options || [])
@@ -1303,6 +1413,7 @@ async function fetchRealtimeQuotes(options = {}) {
       .sort((a, b) => a.strike - b.strike);
     if (!filtered.length) throw new Error("查無 TXO 月選擇權 snapshot，請確認 sponsor 權限或 token。");
     state.futuresQuote = futuresQuote;
+    state.futuresQuotes = futuresRows;
     if (indexQuote) {
       state.indexQuote = indexQuote;
       setSpot(indexQuote.close, `FinMind 加權指數 snapshot${indexQuote.date ? ` ${indexQuote.date}` : ""}`);
@@ -1389,27 +1500,53 @@ async function finmindData(dataset, params) {
 
 function aggregateTaiexRows(rows, date) {
   const values = rows
-    .map((row) => ({ date: row.date, value: number(row.TAIEX, NaN) }))
-    .filter((row) => Number.isFinite(row.value))
-    .sort((a, b) => String(a.date).localeCompare(String(b.date)));
+    .map((row) => {
+      const timestamp = normalizeTaiexIndicatorTimestamp(row);
+      return {
+        timestamp,
+        date: normalizeDateValue(timestamp),
+        value: firstNumber(row.TAIEX, row.taiex),
+      };
+    })
+    .filter((row) => row.date === date && Number.isFinite(row.value) && row.value > 0)
+    .sort((a, b) => a.timestamp.localeCompare(b.timestamp));
   if (!values.length) return null;
-  return {
+  const candle = {
     time: date,
     open: values[0].value,
     high: Math.max(...values.map((row) => row.value)),
     low: Math.min(...values.map((row) => row.value)),
     close: values[values.length - 1].value,
   };
+  return isValidOhlc(candle.open, candle.high, candle.low, candle.close) ? candle : null;
+}
+
+function normalizeTaiexIndicatorTimestamp(row) {
+  const rawDate = String(row.date || row.datetime || row.Date || "").trim().replace("T", " ");
+  const normalizedDate = normalizeDateValue(rawDate);
+  const time = String(row.time || row.Time || "").trim();
+  if (rawDate.includes(":")) return rawDate;
+  if (normalizedDate && time) return `${normalizedDate} ${time}`;
+  return rawDate || normalizedDate;
 }
 
 function normalizeDailyCandle(row) {
   const time = normalizeDateValue(row.date || row.stock_date || row.Date);
-  const open = firstNumber(row.open, row.Open, row.open_price, row.TAIEX);
-  const high = firstNumber(row.max, row.high, row.High, row.high_price, row.TAIEX);
-  const low = firstNumber(row.min, row.low, row.Low, row.low_price, row.TAIEX);
-  const close = firstNumber(row.close, row.Close, row.close_price, row.price, row.TAIEX);
-  if (!time || ![open, high, low, close].every(Number.isFinite)) return null;
+  const open = firstNumber(row.open, row.Open, row.open_price);
+  const high = firstNumber(row.max, row.high, row.High, row.high_price);
+  const low = firstNumber(row.min, row.low, row.Low, row.low_price);
+  const close = firstNumber(row.close, row.Close, row.close_price);
+  if (!time || !isValidOhlc(open, high, low, close)) return null;
   return { time, open, high, low, close };
+}
+
+function isValidOhlc(open, high, low, close) {
+  return [open, high, low, close].every((value) => Number.isFinite(value) && value > 0)
+    && high >= low
+    && high >= open
+    && high >= close
+    && low <= open
+    && low <= close;
 }
 
 function normalizeDateValue(value) {
@@ -1445,21 +1582,22 @@ function normalizeOptionRow(row) {
 
 function normalizeFuturesSnapshotRow(row) {
   const futuresId = String(row.futures_id || "").toUpperCase().trim();
-  if (!futuresId.startsWith("TXF")) return null;
+  const parsed = parseFuturesId(futuresId);
+  if (!parsed) return null;
   const bid = firstNumber(row.buy_price, 0);
   const ask = firstNumber(row.sell_price, 0);
   const close = firstNumber(row.close, bid && ask ? (bid + ask) / 2 : bid || ask);
-  const expiry = futureContractExpiry(futuresId);
   if (!Number.isFinite(close) || close <= 0) return null;
   return {
     futures_id: futuresId,
-    contract: expiry ? `${expiry.getFullYear()}${String(expiry.getMonth() + 1).padStart(2, "0")}` : "",
+    product: parsed.product,
+    contract: parsed.contract,
     close,
     bid,
     ask,
     volume: firstNumber(row.total_volume, row.volume, 0),
     date: String(row.date || ""),
-    expiry,
+    expiry: parsed.expiry,
   };
 }
 
@@ -1524,11 +1662,21 @@ function parseTxoOptionsId(optionsId) {
 }
 
 function futureContractExpiry(futuresId) {
-  const match = String(futuresId || "").toUpperCase().match(/^TXF([A-L])(\d)$/);
+  return parseFuturesId(futuresId)?.expiry || null;
+}
+
+function parseFuturesId(futuresId) {
+  const match = String(futuresId || "").toUpperCase().match(/^([A-Z]+)([A-L])(\d)$/);
   if (!match) return null;
-  const monthIndex = "ABCDEFGHIJKL".indexOf(match[1]);
+  const product = normalizeFutureProduct(match[1]);
+  const monthIndex = "ABCDEFGHIJKL".indexOf(match[2]);
   if (monthIndex < 0) return null;
-  return thirdWednesday(yearFromDerivativeDigit(Number(match[2]), monthIndex), monthIndex);
+  const expiry = thirdWednesday(yearFromDerivativeDigit(Number(match[3]), monthIndex), monthIndex);
+  return {
+    product,
+    contract: `${expiry.getFullYear()}${String(expiry.getMonth() + 1).padStart(2, "0")}`,
+    expiry,
+  };
 }
 
 function yearFromDerivativeDigit(yearDigit, monthIndex) {
@@ -1543,15 +1691,25 @@ function normalizeOptionId(value) {
   return String(value || "").toUpperCase().trim();
 }
 
+function normalizeFutureProduct(value) {
+  const text = String(value || "").toUpperCase().trim();
+  return FUTURE_ALIAS_TO_PRODUCT[text] || (FUTURE_SPECS[text] ? text : "TXF");
+}
+
+function futureMultiplier(product) {
+  return FUTURE_SPECS[normalizeFutureProduct(product)]?.multiplier || FUTURE_SPECS.TXF.multiplier;
+}
+
 function normalizeCallPut(value) {
   const text = String(value || "").toLowerCase();
   if (text.includes("put") || text.includes("p") || text.includes("賣")) return "put";
   return "call";
 }
 
-function selectFrontMonthFuture(rows) {
+function selectFrontMonthFuture(rows, product = "TXF") {
   const today = stripTime(new Date());
-  const activeRows = rows.filter((row) => row && row.close > 0);
+  const targetProduct = normalizeFutureProduct(product);
+  const activeRows = rows.filter((row) => row && row.close > 0 && row.product === targetProduct);
   const datedRows = activeRows
     .filter((row) => row.expiry)
     .sort((a, b) => a.expiry - b.expiry);
@@ -1613,6 +1771,7 @@ function filteredPositions() {
 }
 
 function positionMetrics(position) {
+  if (isFuturePosition(position)) return futurePositionMetrics(position);
   const sign = position.side === "long" ? 1 : -1;
   const t = dte(position.expiry);
   const marketQuote = positionMarketQuote(position);
@@ -1632,12 +1791,32 @@ function positionMetrics(position) {
   };
 }
 
+function futurePositionMetrics(position) {
+  const sign = position.side === "long" ? 1 : -1;
+  const marketQuote = positionMarketQuote(position);
+  const market = marketQuote.price;
+  const multiplier = futureMultiplier(position.product);
+  const qty = number(position.qty, 0);
+  return {
+    market,
+    marketSource: marketQuote.source,
+    pnl: (market - position.premium) * sign * qty * multiplier,
+    delta: sign * qty * multiplier,
+    gamma: null,
+    theta: null,
+    vega: null,
+    iv: null,
+  };
+}
+
 function positionMarketPrice(position) {
   return positionMarketQuote(position).price;
 }
 
 function positionMarketQuote(position) {
-  const snapshot = snapshotMarketQuote(position);
+  const snapshot = isFuturePosition(position)
+    ? snapshotFutureMarketQuote(position)
+    : snapshotOptionMarketQuote(position);
   if (snapshot.price > 0) return snapshot;
   if (position.market > 0) {
     return { price: position.market, source: "legacy" };
@@ -1645,7 +1824,7 @@ function positionMarketQuote(position) {
   return { price: position.premium, source: "entry" };
 }
 
-function snapshotMarketQuote(position) {
+function snapshotOptionMarketQuote(position) {
   const contract = positionContract(position) || currentMonthContract();
   const sameSeries = state.optionChain
     .filter((row) => row.type === position.type)
@@ -1662,10 +1841,38 @@ function snapshotMarketQuote(position) {
   };
 }
 
+function snapshotFutureMarketQuote(position) {
+  const product = normalizeFutureProduct(position.product);
+  const contract = positionContract(position) || state.futuresQuote?.contract || "";
+  const sameProduct = state.futuresQuotes.filter((row) => row.product === product);
+  const exact = sameProduct.find((row) => contract && row.contract === contract);
+  const fallback = selectFrontMonthFuture(sameProduct, product);
+  const proxy = product === "MXF"
+    ? state.futuresQuotes.find((row) => row.product === "TXF" && contract && row.contract === contract) || state.futuresQuote
+    : null;
+  const quote = exact || fallback || proxy;
+  const price = quote?.close || 0;
+  if (price <= 0) return { price: 0, source: "missing", contract };
+  if (!exact && !fallback && proxy) {
+    return {
+      price,
+      source: "txf-proxy",
+      contract: quote.contract,
+    };
+  }
+  return {
+    price,
+    source: exact ? "snapshot" : "snapshot-fallback",
+    contract: quote.contract,
+  };
+}
+
 function syncPositionMarketPrices() {
   let changed = false;
   state.positions = state.positions.map((position) => {
-    const quote = snapshotMarketQuote(position);
+    const quote = isFuturePosition(position)
+      ? snapshotFutureMarketQuote(position)
+      : snapshotOptionMarketQuote(position);
     if (quote.price <= 0) return position;
     const nextContract = position.contract || quote.contract || positionContract(position);
     if (Math.abs(number(position.market, 0) - quote.price) < 0.001 && position.contract === nextContract) {
@@ -1682,6 +1889,10 @@ function syncPositionMarketPrices() {
   return changed;
 }
 
+function isFuturePosition(position) {
+  return position.instrument === "future";
+}
+
 function positionContract(position) {
   if (position.contract) return String(position.contract);
   return expiryToContract(position.expiry);
@@ -1694,10 +1905,11 @@ function expiryToContract(expiry) {
 }
 
 function marketSourceLabel(source) {
-  if (source === "snapshot") return "FinMind 選擇權即時 snapshot";
-  if (source === "snapshot-fallback") return "FinMind snapshot：未找到相同到期月，改用同履約價近似報價";
+  if (source === "snapshot") return "FinMind 即時 snapshot";
+  if (source === "snapshot-fallback") return "FinMind snapshot：未找到相同到期月，改用近月報價";
+  if (source === "txf-proxy") return "FinMind 未回傳小台 snapshot，暫用同月份大台 TXF 即時價估算";
   if (source === "legacy") return "沿用舊部位儲存的市價，等待 FinMind snapshot";
-  return "尚無 snapshot，暫以建倉權利金估算";
+  return "尚無 snapshot，暫以建倉價估算";
 }
 
 function aggregateRisk(positions) {
@@ -1713,23 +1925,33 @@ function aggregateRisk(positions) {
 }
 
 function positionStrikeLevels() {
-  return unique(state.positions.map((position) => number(position.strike, NaN)).filter(Number.isFinite))
+  return unique(state.positions.filter((position) => !isFuturePosition(position)).map((position) => number(position.strike, NaN)).filter(Number.isFinite))
+    .sort((a, b) => a - b);
+}
+
+function positionPriceLevels() {
+  return unique(state.positions.map((position) => {
+    return isFuturePosition(position) ? number(position.premium, NaN) : number(position.strike, NaN);
+  }).filter(Number.isFinite))
     .sort((a, b) => a - b);
 }
 
 function payoffPriceBounds() {
-  const strikes = positionStrikeLevels();
-  if (!strikes.length) {
+  const levels = positionPriceLevels();
+  if (!levels.length) {
     return {
       xMin: Math.max(0, Math.floor((state.spot - 1500) / 100) * 100),
       xMax: Math.ceil((state.spot + 1500) / 100) * 100,
     };
   }
 
-  const minStrike = Math.min(state.spot, strikes[0]);
-  const maxStrike = Math.max(state.spot, strikes.at(-1));
+  const minStrike = Math.min(state.spot, levels[0]);
+  const maxStrike = Math.max(state.spot, levels.at(-1));
   const strikeSpan = Math.max(500, maxStrike - minStrike);
-  const premiumSpan = state.positions.reduce((sum, position) => sum + number(position.premium, 0) * number(position.qty, 1), 0);
+  const premiumSpan = state.positions.reduce((sum, position) => {
+    if (isFuturePosition(position)) return sum;
+    return sum + number(position.premium, 0) * number(position.qty, 1);
+  }, 0);
   const padding = Math.max(1200, strikeSpan * 0.65, premiumSpan + 500);
   return {
     xMin: Math.max(0, Math.floor((minStrike - padding) / 100) * 100),
@@ -1739,6 +1961,10 @@ function payoffPriceBounds() {
 
 function portfolioPayoff(underlying) {
   return state.positions.reduce((sum, position) => {
+    if (isFuturePosition(position)) {
+      const sign = position.side === "long" ? 1 : -1;
+      return sum + (underlying - position.premium) * sign * position.qty * futureMultiplier(position.product);
+    }
     const intrinsic = position.type === "call"
       ? Math.max(0, underlying - position.strike)
       : Math.max(0, position.strike - underlying);
@@ -1748,10 +1974,13 @@ function portfolioPayoff(underlying) {
 }
 
 function expiryPayoffExtremes() {
-  const strikes = positionStrikeLevels();
-  const criticalPrices = unique([0, ...strikes]).sort((a, b) => a - b);
+  const criticalPrices = unique([0, ...positionPriceLevels()]).sort((a, b) => a - b);
   const values = criticalPrices.length ? criticalPrices.map(portfolioPayoff) : [0];
   const upperSlope = state.positions.reduce((sum, position) => {
+    if (isFuturePosition(position)) {
+      const sign = position.side === "long" ? 1 : -1;
+      return sum + sign * position.qty * futureMultiplier(position.product);
+    }
     if (position.type !== "call") return sum;
     const sign = position.side === "long" ? 1 : -1;
     return sum + sign * position.qty * POINT_VALUE;
@@ -1765,6 +1994,10 @@ function expiryPayoffExtremes() {
 
 function portfolioTheoryPnl(underlying) {
   return state.positions.reduce((sum, position) => {
+    if (isFuturePosition(position)) {
+      const sign = position.side === "long" ? 1 : -1;
+      return sum + (underlying - position.premium) * sign * position.qty * futureMultiplier(position.product);
+    }
     const t = dte(position.expiry);
     const market = positionMarketPrice(position);
     const iv = impliedVolatility(state.spot, position.strike, t, state.rate, market || position.premium, position.type) || 0.22;
@@ -2033,6 +2266,12 @@ function findBreakevens(points) {
 }
 
 function contractLabel(position) {
+  if (isFuturePosition(position)) {
+    const product = normalizeFutureProduct(position.product);
+    const spec = FUTURE_SPECS[product] || FUTURE_SPECS.TXF;
+    const contract = positionContract(position) || state.futuresQuote?.contract || "";
+    return `${spec.label} ${contract}`;
+  }
   const ym = positionContract(position) || "TXO";
   return `TXO ${ym} ${position.strike}${position.type === "call" ? "C" : "P"}`;
 }
@@ -2242,6 +2481,18 @@ function formatNumber(value, digits = 0) {
 function formatMoney(value) {
   const sign = value < 0 ? "-" : "";
   return `${sign}$${Math.abs(Math.round(value)).toLocaleString("zh-TW")}`;
+}
+
+function formatNullableNumber(value, digits = 0) {
+  return Number.isFinite(value) ? formatNumber(value, digits) : "-";
+}
+
+function formatNullableMoney(value) {
+  return Number.isFinite(value) ? formatMoney(value) : "-";
+}
+
+function formatNullablePercent(value) {
+  return Number.isFinite(value) ? formatPercent(value) : "-";
 }
 
 function formatPercent(value) {
