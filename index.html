@@ -84,10 +84,6 @@
               <input name="premium" type="number" inputmode="decimal" min="0" step="0.1" value="120" />
             </label>
             <label>
-              <span>市價</span>
-              <input name="market" type="number" inputmode="decimal" min="0" step="0.1" value="130" />
-            </label>
-            <label>
               <span>到期日</span>
               <input name="expiry" type="date" />
             </label>
@@ -124,10 +120,10 @@
               <h2>總部位 Payoff</h2>
               <p>到期損益曲線、理論損益曲線與兩平點。</p>
             </div>
-            <label class="compact-field">
+            <div class="spot-readout compact-field" aria-live="polite">
               <span>現貨指數</span>
-              <input id="spotInput" type="number" inputmode="decimal" min="1" step="1" value="22600" />
-            </label>
+              <strong id="payoffSpotReadout">22,600</strong>
+            </div>
           </div>
           <canvas id="payoffCanvas" width="920" height="420" aria-label="選擇權總部位 payoff 圖"></canvas>
           <div id="payoffStats" class="stat-grid"></div>
@@ -170,44 +166,44 @@
         <section class="panel option-chain-panel">
           <div class="panel-header">
             <div>
-              <h2>選擇權日資料與 IV 監控</h2>
-              <p>以 `TaiwanOptionDaily` 更新選擇權鏈，並估算 IV 與偏斜。</p>
+              <h2>自動化交易選擇權部位</h2>
+              <p>本合約周期每日建立部位與損益追蹤。</p>
             </div>
-            <button id="fetchOptionsBtn" type="button" class="secondary-action">抓取選擇權</button>
+            <button id="fetchOptionsBtn" type="button" class="secondary-action">同步報價快取</button>
           </div>
-          <div class="data-controls slim">
-            <label>
-              <span>交易日</span>
-              <input id="optionDateInput" type="date" />
-            </label>
-            <label>
-              <span>到期月</span>
-              <input id="contractInput" type="text" placeholder="例如 202406 或留空" />
-            </label>
-            <label>
-              <span>利率</span>
-              <input id="rateInput" type="number" inputmode="decimal" step="0.001" value="0.015" />
-            </label>
+          <div class="automation-placeholders">
+            <div>
+              <span>合約口數</span>
+              <strong>待設定</strong>
+            </div>
+            <div>
+              <span>買賣方</span>
+              <strong>待設定</strong>
+            </div>
+            <div>
+              <span>交易方向</span>
+              <strong>待設定</strong>
+            </div>
           </div>
-          <div class="table-wrap compact-table">
-            <table>
+          <div class="table-wrap compact-table automation-log-wrap">
+            <table class="automation-table">
               <thead>
                 <tr>
-                  <th>履約價</th>
-                  <th>Call</th>
-                  <th>Call IV</th>
-                  <th>Put</th>
-                  <th>Put IV</th>
-                  <th>Skew</th>
-                  <th>量</th>
-                  <th>OI</th>
-                  <th></th>
+                  <th>日期</th>
+                  <th>契約</th>
+                  <th>買賣</th>
+                  <th>方向</th>
+                  <th>口數</th>
+                  <th>建倉價</th>
+                  <th>市價</th>
+                  <th>日損益</th>
+                  <th>累計損益</th>
                 </tr>
               </thead>
               <tbody id="optionChainBody"></tbody>
             </table>
           </div>
-          <p id="optionStatus" class="status-line">尚未連線 FinMind，先顯示示範選擇權鏈。</p>
+          <p id="optionStatus" class="status-line">等待本機報價快取同步。</p>
         </section>
 
         <section class="panel strategy-panel">
@@ -250,10 +246,42 @@
                   <th>波動率</th>
                   <th>時間</th>
                   <th>交易策略</th>
-                  <th>價差型策略</th>
                 </tr>
               </thead>
               <tbody id="strategyBody"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="panel t-quote-panel">
+          <div class="panel-header">
+            <div>
+              <h2>近月選擇權T型報價</h2>
+              <p>以近月台指期貨價格為中心，顯示上下 5000 點履約價內的 TXO 月選擇權。</p>
+            </div>
+            <span id="tQuoteStatus" class="provider-note">讀取中...</span>
+          </div>
+          <div class="table-wrap t-quote-wrap">
+            <table class="t-quote-table">
+              <thead>
+                <tr>
+                  <th colspan="4">Call</th>
+                  <th class="strike-heading">履約價</th>
+                  <th colspan="4">Put</th>
+                </tr>
+                <tr>
+                  <th>量</th>
+                  <th>賣價</th>
+                  <th>買價</th>
+                  <th>成交</th>
+                  <th class="strike-heading">Strike</th>
+                  <th>成交</th>
+                  <th>買價</th>
+                  <th>賣價</th>
+                  <th>量</th>
+                </tr>
+              </thead>
+              <tbody id="tQuoteBody"></tbody>
             </table>
           </div>
         </section>

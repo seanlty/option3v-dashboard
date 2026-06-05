@@ -1,6 +1,9 @@
 const POINT_VALUE = 50;
 const STORAGE_KEY = "txo-dashboard-positions-v1";
 const FINMIND_URL = "https://api.finmindtrade.com/api/v4/data";
+const T_QUOTE_STRIKE_RANGE = 5000;
+const SAMPLE_MONTHLY_STRIKE_STEP = 100;
+const QUOTE_POLL_MS = 5000;
 const KNOWN_TWSE_CLOSED_DATES = new Set(["2026-05-01"]);
 const CHART_PRICE_SCALE_WIDTH = 72;
 const FALLBACK_SETTLEMENT_DATES = [
@@ -18,6 +21,9 @@ const state = {
   rate: 0.015,
   indexCandles: [],
   optionChain: [],
+  automationPositions: [],
+  futuresQuote: null,
+  indexQuote: null,
   indexChart: null,
   scoreChart: null,
   scoreDeltaChart: null,
@@ -32,8 +38,10 @@ const state = {
   scoreByTime: new Map(),
   scoreDeltaByTime: new Map(),
   settlementDates: [...FALLBACK_SETTLEMENT_DATES],
-  finmindToken: "",
   isFetchingIndex: false,
+  isFetchingQuotes: false,
+  chartResizeFrame: null,
+  chartResizeObserver: null,
   strategyFilters: {
     view: "all",
     volatility: "all",
@@ -51,10 +59,12 @@ document.addEventListener("DOMContentLoaded", () => {
   bindEvents();
   renderAll();
   loadSettlementDates().then(renderAll);
-  loadEnvToken().then(() => fetchIndexCandles({ auto: true }));
+  fetchIndexCandles({ auto: true });
+  fetchRealtimeQuotes({ auto: true });
+  window.setInterval(() => fetchRealtimeQuotes({ auto: true, refresh: true }), QUOTE_POLL_MS);
   window.addEventListener("resize", () => {
     drawPayoff();
-    resizeIndexChart();
+    scheduleIndexChartResize();
   });
 });
 
@@ -65,6 +75,7 @@ function bindElements() {
     positionsBody: document.querySelector("#positionsBody"),
     spotInput: document.querySelector("#spotInput"),
     spotReadout: document.querySelector("#spotReadout"),
+    payoffSpotReadout: document.querySelector("#payoffSpotReadout"),
     deltaReadout: document.querySelector("#deltaReadout"),
     pnlReadout: document.querySelector("#pnlReadout"),
     expiryReadout: document.querySelector("#expiryReadout"),
@@ -94,17 +105,19 @@ function bindElements() {
     strategyViewFilter: document.querySelector("#strategyViewFilter"),
     strategyVolFilter: document.querySelector("#strategyVolFilter"),
     strategyTimeFilter: document.querySelector("#strategyTimeFilter"),
+    tQuoteBody: document.querySelector("#tQuoteBody"),
+    tQuoteStatus: document.querySelector("#tQuoteStatus"),
   });
 }
 
 function bindEvents() {
   els.positionForm.addEventListener("submit", handleAddPosition);
   els.addPositionBtn.addEventListener("click", handleAddPosition);
-  els.spotInput.addEventListener("input", () => {
+  els.spotInput?.addEventListener("input", () => {
     state.spot = number(els.spotInput.value, state.spot);
     renderAll();
   });
-  els.rateInput.addEventListener("input", () => {
+  els.rateInput?.addEventListener("input", () => {
     state.rate = number(els.rateInput.value, state.rate);
     renderAll();
   });
@@ -117,13 +130,15 @@ function bindEvents() {
     });
   });
   els.fetchIndexBtn.addEventListener("click", fetchIndexCandles);
-  els.fetchOptionsBtn.addEventListener("click", fetchOptionDaily);
+  els.fetchOptionsBtn.addEventListener("click", fetchRealtimeQuotes);
   els.positionsBody.addEventListener("click", handlePositionAction);
   els.optionChainBody.addEventListener("click", handleChainAction);
+  els.tQuoteBody.addEventListener("click", handleChainAction);
   els.strategyViewFilter.addEventListener("change", handleStrategyFilterChange);
   els.strategyVolFilter.addEventListener("change", handleStrategyFilterChange);
   els.strategyTimeFilter.addEventListener("change", handleStrategyFilterChange);
   populateStrategyFilters();
+  observeIndexChartSize();
 }
 
 function setDefaultDates() {
@@ -137,7 +152,7 @@ function setDefaultDates() {
 
   els.startDateInput.value = start;
   els.endDateInput.value = end;
-  els.optionDateInput.value = end;
+  if (els.optionDateInput) els.optionDateInput.value = end;
   els.positionForm.elements.expiry.value = toDateInput(expiry);
 }
 
@@ -189,7 +204,7 @@ function savePositions() {
 }
 
 function defaultPositions() {
-  const expiry = toDateInput(thirdWednesday(new Date().getFullYear(), new Date().getMonth() + 1));
+  const expiry = toDateInput(frontMonthExpiry(new Date()));
   return [
     {
       id: makeId(),
@@ -199,7 +214,6 @@ function defaultPositions() {
       strike: 23000,
       qty: 2,
       premium: 155,
-      market: 132,
       expiry,
     },
     {
@@ -210,7 +224,6 @@ function defaultPositions() {
       strike: 22000,
       qty: 2,
       premium: 118,
-      market: 126,
       expiry,
     },
     {
@@ -221,7 +234,6 @@ function defaultPositions() {
       strike: 21600,
       qty: 1,
       premium: 72,
-      market: 78,
       expiry,
     },
   ];
@@ -233,13 +245,15 @@ function seedMarketData() {
 }
 
 function renderAll() {
-  els.spotInput.value = Math.round(state.spot);
+  if (els.spotInput) els.spotInput.value = Math.round(state.spot);
   els.spotReadout.textContent = formatNumber(state.spot, 0);
+  if (els.payoffSpotReadout) els.payoffSpotReadout.textContent = formatNumber(state.spot, 0);
   renderPositions();
   drawPayoff();
   renderIndexChart();
   renderOptionChain();
   renderStrategyTable();
+  renderTQuoteTable();
   renderCalendar();
   renderRiskAndAdvice();
 }
@@ -247,6 +261,7 @@ function renderAll() {
 function handleAddPosition(event) {
   event.preventDefault();
   const form = new FormData(els.positionForm);
+  const expiry = form.get("expiry");
   const position = {
     id: makeId(),
     kind: form.get("kind"),
@@ -255,12 +270,14 @@ function handleAddPosition(event) {
     strike: number(form.get("strike"), 0),
     qty: Math.max(1, number(form.get("qty"), 1)),
     premium: Math.max(0, number(form.get("premium"), 0)),
-    market: Math.max(0, number(form.get("market"), 0)),
-    expiry: form.get("expiry"),
+    contract: expiryToContract(expiry),
+    expiry,
   };
   state.positions.push(position);
+  const synced = syncPositionMarketPrices();
   savePositions();
   renderAll();
+  if (!synced) fetchRealtimeQuotes({ refresh: true });
 }
 
 function handlePositionAction(event) {
@@ -287,7 +304,7 @@ function handleChainAction(event) {
   const strike = number(button.dataset.strike, state.spot);
   const type = button.dataset.type;
   const price = number(button.dataset.price, 0);
-  const expiry = contractToExpiry(button.dataset.contract) || els.positionForm.elements.expiry.value;
+  const expiry = toDateInput(contractToExpiry(button.dataset.contract) || parseDate(els.positionForm.elements.expiry.value) || frontMonthExpiry(new Date()));
   state.positions.push({
     id: makeId(),
     kind: "sim",
@@ -296,9 +313,11 @@ function handleChainAction(event) {
     strike,
     qty: 1,
     premium: price,
+    contract: button.dataset.contract,
     market: price,
     expiry,
   });
+  syncPositionMarketPrices();
   savePositions();
   renderAll();
 }
@@ -308,6 +327,7 @@ function renderPositions() {
   els.positionsBody.innerHTML = positions.map((position) => {
     const metrics = positionMetrics(position);
     const pnlClass = metrics.pnl >= 0 ? "positive" : "negative";
+    const marketTitle = marketSourceLabel(metrics.marketSource);
     return `
       <tr>
         <td><span class="tag ${position.kind}">${position.kind === "live" ? "實際" : "模擬"}</span></td>
@@ -315,7 +335,7 @@ function renderPositions() {
         <td>${position.side === "long" ? "買進" : "賣出"}</td>
         <td>${position.qty}</td>
         <td>${formatNumber(position.premium, 1)}</td>
-        <td>${formatNumber(position.market, 1)}</td>
+        <td title="${marketTitle}">${formatQuote(metrics.market)}</td>
         <td class="${pnlClass}">${formatMoney(metrics.pnl)}</td>
         <td>${formatNumber(metrics.delta, 2)}</td>
         <td>${formatNumber(metrics.gamma, 3)}</td>
@@ -353,11 +373,9 @@ function drawPayoff() {
   const width = rect.width;
   const height = rect.height;
   const pad = { left: 64, right: 24, top: 24, bottom: 44 };
-  const strikes = state.positions.map((item) => item.strike);
-  const minStrike = Math.min(state.spot, ...strikes);
-  const maxStrike = Math.max(state.spot, ...strikes);
-  const xMin = Math.floor((minStrike - 1400) / 100) * 100;
-  const xMax = Math.ceil((maxStrike + 1400) / 100) * 100;
+  const bounds = payoffPriceBounds();
+  const { xMin, xMax } = bounds;
+  const strikeLevels = positionStrikeLevels();
   const points = [];
   for (let price = xMin; price <= xMax; price += 50) {
     points.push({
@@ -377,7 +395,10 @@ function drawPayoff() {
   ctx.fillStyle = "#ffffff";
   ctx.fillRect(0, 0, width, height);
 
+  drawPnlZones(ctx, points, scaleX, pad.top, height - pad.bottom);
   drawGrid(ctx, width, height, pad, xMin, xMax, yMin - yPad, yMax + yPad, scaleX, scaleY);
+  drawZeroPnlLine(ctx, scaleY(0), pad.left, width - pad.right);
+  drawStrikeMarkers(ctx, strikeLevels, scaleX, pad.top, height - pad.bottom);
   drawLine(ctx, points, scaleX, scaleY, "expiry", "#2563eb", 2.6);
   drawLine(ctx, points, scaleX, scaleY, "theory", "#0f8f66", 2);
   drawVerticalMarker(ctx, scaleX(state.spot), pad.top, height - pad.bottom, "#d64545", `現貨 ${formatNumber(state.spot, 0)}`);
@@ -413,6 +434,55 @@ function drawGrid(ctx, width, height, pad, xMin, xMax, yMin, yMax, scaleX, scale
     ctx.stroke();
     ctx.fillText(formatCompact(value), 8, y + 4);
   }
+}
+
+function drawPnlZones(ctx, points, scaleX, yTop, yBottom) {
+  ctx.save();
+  for (let index = 1; index < points.length; index += 1) {
+    const prev = points[index - 1];
+    const next = points[index];
+    const x1 = scaleX(prev.price);
+    const x2 = scaleX(next.price);
+    const midpointPnl = (prev.expiry + next.expiry) / 2;
+    ctx.fillStyle = midpointPnl >= 0 ? "rgba(15, 143, 102, 0.06)" : "rgba(214, 69, 69, 0.06)";
+    ctx.fillRect(x1, yTop, Math.max(1, x2 - x1), yBottom - yTop);
+  }
+  ctx.restore();
+}
+
+function drawZeroPnlLine(ctx, y, xLeft, xRight) {
+  ctx.save();
+  ctx.strokeStyle = "#111827";
+  ctx.lineWidth = 1.4;
+  ctx.beginPath();
+  ctx.moveTo(xLeft, y);
+  ctx.lineTo(xRight, y);
+  ctx.stroke();
+  ctx.fillStyle = "#111827";
+  ctx.font = "12px system-ui";
+  ctx.fillText("損益 0", xLeft + 8, y - 6);
+  ctx.restore();
+}
+
+function drawStrikeMarkers(ctx, strikes, scaleX, yTop, yBottom) {
+  if (!strikes.length) return;
+  ctx.save();
+  ctx.strokeStyle = "#94a3b8";
+  ctx.fillStyle = "#627181";
+  ctx.font = "11px system-ui";
+  strikes.forEach((strike, index) => {
+    const x = scaleX(strike);
+    ctx.setLineDash([3, 5]);
+    ctx.beginPath();
+    ctx.moveTo(x, yTop);
+    ctx.lineTo(x, yBottom);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    const label = `K ${formatNumber(strike, 0)}`;
+    const labelY = yTop + 14 + (index % 2) * 14;
+    ctx.fillText(label, index === strikes.length - 1 ? x - 44 : x + 4, labelY);
+  });
+  ctx.restore();
 }
 
 function drawLine(ctx, points, scaleX, scaleY, key, color, width) {
@@ -460,16 +530,22 @@ function drawLegend(ctx, width, pad) {
 }
 
 function renderPayoffStats(points) {
-  const expiryValues = points.map((point) => point.expiry);
-  const maxProfit = Math.max(...expiryValues);
-  const maxLoss = Math.min(...expiryValues);
+  const extremes = expiryPayoffExtremes();
   const breakevens = findBreakevens(points);
   const atSpot = portfolioPayoff(state.spot);
+  const strikeLevels = positionStrikeLevels();
+  const strikeRange = strikeLevels.length
+    ? `${formatNumber(strikeLevels[0], 0)} - ${formatNumber(strikeLevels.at(-1), 0)} / ${strikeLevels.length} 檔`
+    : "無部位";
+  const maxProfitText = extremes.maxProfit === Infinity ? "無上限" : formatMoney(extremes.maxProfit);
+  const maxLossText = extremes.maxLoss === -Infinity ? "無下限" : formatMoney(extremes.maxLoss);
   els.payoffStats.innerHTML = [
     ["現價到期損益", formatMoney(atSpot), atSpot >= 0 ? "positive" : "negative"],
-    ["最大利潤", maxProfit > 9000000 ? "無上限" : formatMoney(maxProfit), "positive"],
-    ["最大損失", maxLoss < -9000000 ? "無下限" : formatMoney(maxLoss), "negative"],
+    ["最大利潤", maxProfitText, "positive"],
+    ["最大損失", maxLossText, "negative"],
     ["兩平點", breakevens.length ? breakevens.map((item) => formatNumber(item, 0)).join(" / ") : "無", ""],
+    ["履約價範圍", strikeRange, ""],
+    ["到期損益區間", `${maxLossText} ~ ${maxProfitText}`, ""],
   ].map(([label, value, className]) => `
     <div class="stat-card">
       <span>${label}</span>
@@ -571,13 +647,38 @@ function renderIndexChart() {
 
 function resizeIndexChart() {
   if (!state.indexChart || !state.scoreChart || !state.scoreDeltaChart) return;
-  const priceRect = els.priceChart.getBoundingClientRect();
-  const scoreRect = els.scoreChart.getBoundingClientRect();
-  const deltaRect = els.scoreDeltaChart.getBoundingClientRect();
-  state.indexChart.applyOptions({ width: Math.floor(priceRect.width), height: Math.floor(priceRect.height) });
-  state.scoreChart.applyOptions({ width: Math.floor(scoreRect.width), height: Math.floor(scoreRect.height) });
-  state.scoreDeltaChart.applyOptions({ width: Math.floor(deltaRect.width), height: Math.floor(deltaRect.height) });
+  const priceSize = chartElementSize(els.priceChart);
+  const scoreSize = chartElementSize(els.scoreChart);
+  const deltaSize = chartElementSize(els.scoreDeltaChart);
+  if (!priceSize.width || !scoreSize.width || !deltaSize.width) return;
+  state.indexChart.applyOptions(priceSize);
+  state.scoreChart.applyOptions(scoreSize);
+  state.scoreDeltaChart.applyOptions(deltaSize);
   renderEventLane();
+}
+
+function scheduleIndexChartResize() {
+  if (state.chartResizeFrame) cancelAnimationFrame(state.chartResizeFrame);
+  state.chartResizeFrame = requestAnimationFrame(() => {
+    state.chartResizeFrame = null;
+    resizeIndexChart();
+  });
+}
+
+function observeIndexChartSize() {
+  if (!window.ResizeObserver || state.chartResizeObserver) return;
+  state.chartResizeObserver = new ResizeObserver(() => scheduleIndexChartResize());
+  [els.priceChart, els.scoreChart, els.scoreDeltaChart].forEach((element) => {
+    if (element) state.chartResizeObserver.observe(element);
+  });
+}
+
+function chartElementSize(element) {
+  const rect = element.getBoundingClientRect();
+  return {
+    width: Math.max(1, Math.floor(element.clientWidth || rect.width)),
+    height: Math.max(1, Math.floor(element.clientHeight || rect.height)),
+  };
 }
 
 function syncIndexChartRanges() {
@@ -835,27 +936,72 @@ function deltaColor(value) {
 }
 
 function renderOptionChain() {
-  const grouped = groupOptionChain(state.optionChain);
-  els.optionChainBody.innerHTML = grouped.map((row) => {
-    const callIv = row.call ? impliedVolatility(state.spot, row.strike, dteFromContract(row.contract), state.rate, row.call.close, "call") : null;
-    const putIv = row.put ? impliedVolatility(state.spot, row.strike, dteFromContract(row.contract), state.rate, row.put.close, "put") : null;
-    const skew = callIv && putIv ? putIv - callIv : null;
-    const volume = (row.call?.volume || 0) + (row.put?.volume || 0);
-    const oi = (row.call?.open_interest || 0) + (row.put?.open_interest || 0);
+  const rows = state.automationPositions;
+  els.optionChainBody.innerHTML = rows.map((row) => {
+    const dailyClass = row.dailyPnl >= 0 ? "positive" : "negative";
+    const totalClass = row.totalPnl >= 0 ? "positive" : "negative";
     return `
       <tr>
-        <td>${formatNumber(row.strike, 0)}</td>
-        <td>${row.call ? formatNumber(row.call.close, 1) : "-"}</td>
-        <td>${callIv ? formatPercent(callIv) : "-"}</td>
-        <td>${row.put ? formatNumber(row.put.close, 1) : "-"}</td>
-        <td>${putIv ? formatPercent(putIv) : "-"}</td>
-        <td class="${skew && skew > 0 ? "negative" : ""}">${skew === null ? "-" : formatPercent(skew)}</td>
-        <td>${formatNumber(volume, 0)}</td>
-        <td>${formatNumber(oi, 0)}</td>
-        <td>
-          ${row.call ? `<button type="button" class="ghost-action" data-action="add-chain" data-type="call" data-strike="${row.strike}" data-price="${row.call.close}" data-contract="${row.contract}">+C</button>` : ""}
-          ${row.put ? `<button type="button" class="ghost-action" data-action="add-chain" data-type="put" data-strike="${row.strike}" data-price="${row.put.close}" data-contract="${row.contract}">+P</button>` : ""}
+        <td>${row.date}</td>
+        <td>${row.contract}</td>
+        <td>${row.side}</td>
+        <td>${row.direction}</td>
+        <td>${row.qty}</td>
+        <td>${formatNumber(row.entryPrice, 1)}</td>
+        <td>${formatNumber(row.marketPrice, 1)}</td>
+        <td class="${dailyClass}">${formatMoney(row.dailyPnl)}</td>
+        <td class="${totalClass}">${formatMoney(row.totalPnl)}</td>
+      </tr>
+    `;
+  }).join("");
+
+  if (!rows.length) {
+    els.optionChainBody.innerHTML = `<tr><td colspan="9">本合約周期尚未建立自動化交易部位。</td></tr>`;
+  }
+}
+
+function renderTQuoteTable() {
+  const contract = currentMonthContract();
+  if (!contract) {
+    els.tQuoteStatus.textContent = "目前沒有可用的近月選擇權資料";
+    els.tQuoteBody.innerHTML = `<tr><td colspan="9">尚無選擇權鏈資料。</td></tr>`;
+    return;
+  }
+
+  const centerPrice = tQuoteCenterPrice();
+  const grouped = groupOptionChain(state.optionChain, { contract, center: centerPrice, range: T_QUOTE_STRIKE_RANGE });
+  if (!grouped.length) {
+    els.tQuoteStatus.textContent = `${contract} 近月`;
+    els.tQuoteBody.innerHTML = `<tr><td colspan="9">此契約沒有落在期貨價格上下 ${formatNumber(T_QUOTE_STRIKE_RANGE, 0)} 點內的履約價資料。</td></tr>`;
+    return;
+  }
+  const atm = grouped.reduce((best, row) => {
+    return Math.abs(row.strike - centerPrice) < Math.abs(best.strike - centerPrice) ? row : best;
+  }, grouped[0]);
+  const expiry = contractToExpiry(contract);
+  const dteText = expiry ? ` / ${Math.max(0, businessDaysBetween(stripTime(new Date()), expiry))}D` : "";
+  const futureText = state.futuresQuote
+    ? `近月台指期 ${formatNumber(state.futuresQuote.close, 0)}（${state.futuresQuote.futures_id}）`
+    : `中心價 ${formatNumber(centerPrice, 0)}`;
+  const strikeStatus = tQuoteStrikeStatus(grouped);
+  els.tQuoteStatus.textContent = `${contract} 近月${dteText} / ${futureText} / ${strikeStatus}`;
+  els.tQuoteBody.innerHTML = grouped.map((row) => {
+    const atmClass = atm && row.strike === atm.strike ? "atm-row" : "";
+    return `
+      <tr class="${atmClass}">
+        <td>${row.call ? formatNumber(row.call.volume, 0) : "-"}</td>
+        <td>${row.call ? formatQuote(row.call.ask) : "-"}</td>
+        <td>${row.call ? formatQuote(row.call.bid) : "-"}</td>
+        <td class="quote-call">
+          ${row.call ? `<button type="button" class="quote-price" data-action="add-chain" data-type="call" data-strike="${row.strike}" data-price="${optionMarkPrice(row.call)}" data-contract="${row.contract}" title="加入 Call 模擬部位">${formatQuote(optionMarkPrice(row.call))}</button>` : "-"}
         </td>
+        <td class="strike-cell">${formatNumber(row.strike, 0)}</td>
+        <td class="quote-put">
+          ${row.put ? `<button type="button" class="quote-price" data-action="add-chain" data-type="put" data-strike="${row.strike}" data-price="${optionMarkPrice(row.put)}" data-contract="${row.contract}" title="加入 Put 模擬部位">${formatQuote(optionMarkPrice(row.put))}</button>` : "-"}
+        </td>
+        <td>${row.put ? formatQuote(row.put.bid) : "-"}</td>
+        <td>${row.put ? formatQuote(row.put.ask) : "-"}</td>
+        <td>${row.put ? formatNumber(row.put.volume, 0) : "-"}</td>
       </tr>
     `;
   }).join("");
@@ -875,12 +1021,11 @@ function renderStrategyTable() {
       <td>${row.volLeg}</td>
       <td>${row.timeLeg}</td>
       <td>${row.trade}</td>
-      <td>${row.spread}</td>
     </tr>
   `).join("");
 
   if (!rows.length) {
-    els.strategyBody.innerHTML = `<tr><td colspan="9">沒有符合目前 3V 篩選條件的策略。</td></tr>`;
+    els.strategyBody.innerHTML = `<tr><td colspan="8">沒有符合目前 3V 篩選條件的策略。</td></tr>`;
   }
 }
 
@@ -1091,7 +1236,7 @@ async function fetchIndexCandles(options = {}) {
 
     if (!candles.length) throw new Error("查無 TAIEX 資料，可能是假日、權限或請求額度限制。");
     state.indexCandles = candles;
-    state.spot = candles[candles.length - 1].close;
+    setSpot(candles[candles.length - 1].close, latestCandle ? `FinMind 加權指數五秒重建 ${latestTradingDate}` : `FinMind 加權指數收盤價 ${latestTradingDate}`);
     const droppedText = droppedCount > 0 ? `，已略過 ${droppedCount} 個無日資料交易日` : "";
     const latestText = latestCandle ? `，最新交易日 ${latestTradingDate} 已用五秒資料重建` : `，最新交易日 ${latestTradingDate} 沒有五秒資料，保留日資料`;
     els.marketStatus.textContent = `已更新 ${candles.length} 根加權指數日線${droppedText}${latestText}。`;
@@ -1138,13 +1283,78 @@ async function fetchTaiexDailyCandles(startDate, endDate) {
   throw new Error("加權指數日資料端點查無資料。");
 }
 
+async function fetchRealtimeQuotes(options = {}) {
+  if (state.isFetchingQuotes) return;
+  state.isFetchingQuotes = true;
+  const shouldAnnounce = !options.refresh;
+  if (shouldAnnounce) {
+    els.fetchOptionsBtn.disabled = true;
+    els.optionStatus.textContent = "正在讀取本機即時報價快取...";
+  }
+  try {
+    const payload = await localQuoteCache({ force: !options.auto && !options.refresh });
+    const futuresQuote = selectFrontMonthFuture((payload.futures || []).map(normalizeFuturesSnapshotRow).filter(Boolean));
+    if (!futuresQuote) throw new Error("查無近月台指期貨 snapshot。");
+    const indexQuote = selectIndexQuote((payload.index || []).map(normalizeIndexSnapshotRow).filter(Boolean));
+    const filtered = (payload.options || [])
+      .filter((row) => String(row.options_id || "").toUpperCase().startsWith("TXO"))
+      .map(normalizeOptionSnapshotRow)
+      .filter((row) => row && row.strike > 0)
+      .sort((a, b) => a.strike - b.strike);
+    if (!filtered.length) throw new Error("查無 TXO 月選擇權 snapshot，請確認 sponsor 權限或 token。");
+    state.futuresQuote = futuresQuote;
+    if (indexQuote) {
+      state.indexQuote = indexQuote;
+      setSpot(indexQuote.close, `FinMind 加權指數 snapshot${indexQuote.date ? ` ${indexQuote.date}` : ""}`);
+    }
+    state.optionChain = filtered;
+    syncPositionMarketPrices();
+    const latestTime = latestQuoteTime([futuresQuote, ...filtered]);
+    const cacheTime = payload.updated_at ? `，快取 ${formatCacheTime(payload.updated_at)}` : "";
+    const warningText = payload.error ? `；上次更新警告：${payload.error}` : "";
+    const indexText = indexQuote ? `；加權指數 ${formatNumber(indexQuote.close, 0)}` : "";
+    els.optionStatus.textContent = `已讀取 ${filtered.length} 筆 TXO snapshot；近月台指期 ${futuresQuote.futures_id} ${formatNumber(futuresQuote.close, 0)}${indexText}${latestTime ? `，行情 ${latestTime}` : ""}${cacheTime}${warningText}。`;
+    renderAll();
+  } catch (error) {
+    const fallbackText = options.auto ? "，目前保留示範選擇權鏈" : "";
+    if (shouldAnnounce) {
+      els.optionStatus.textContent = `本機即時報價快取讀取失敗：${error.message}${fallbackText}`;
+    }
+  } finally {
+    if (shouldAnnounce) els.fetchOptionsBtn.disabled = false;
+    state.isFetchingQuotes = false;
+  }
+}
+
+async function localQuoteCache(options = {}) {
+  const urls = [
+    new URL("/api/latest-quotes", window.location.origin),
+    new URL("http://127.0.0.1:8766/api/latest-quotes"),
+  ];
+  if (options.force) {
+    urls.forEach((url) => url.searchParams.set("force", "1"));
+  }
+  let response = null;
+  for (const url of urls) {
+    response = await fetch(url, { cache: "no-store" }).catch(() => null);
+    if (response?.ok) break;
+  }
+  if (!response?.ok) throw new Error(response ? `HTTP ${response.status}` : "快取服務未啟動");
+  const payload = await response.json();
+  if (!payload.ok && !(payload.futures || []).length && !(payload.options || []).length) {
+    throw new Error(payload.error || "快取尚未產生。");
+  }
+  return payload;
+}
+
 async function fetchOptionDaily() {
   els.fetchOptionsBtn.disabled = true;
   els.optionStatus.textContent = "正在向 FinMind 抓取 TaiwanOptionDaily...";
   try {
+    if (!els.optionDateInput) throw new Error("日資料查詢介面未啟用。");
     const params = { start_date: els.optionDateInput.value };
     const rows = await finmindData("TaiwanOptionDaily", params);
-    const contract = els.contractInput.value.trim();
+    const contract = els.contractInput?.value.trim() || "";
     const filtered = rows
       .filter((row) => normalizeOptionId(row.option_id) === "TXO")
       .filter((row) => !contract || String(row.contract_date).includes(contract))
@@ -1168,7 +1378,6 @@ async function finmindData(dataset, params) {
   Object.entries(params).forEach(([key, value]) => {
     if (value) url.searchParams.set(key, value);
   });
-  if (state.finmindToken) url.searchParams.set("token", state.finmindToken);
   const response = await fetch(url);
   if (!response.ok) throw new Error(`HTTP ${response.status}`);
   const payload = await response.json();
@@ -1176,33 +1385,6 @@ async function finmindData(dataset, params) {
     throw new Error(payload.msg || `FinMind status ${payload.status}`);
   }
   return payload.data || [];
-}
-
-async function loadEnvToken() {
-  try {
-    const response = await fetch(".env", { cache: "no-store" });
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    const env = parseEnv(await response.text());
-    state.finmindToken = env.FINMIND_TOKEN || "";
-    if (!state.finmindToken) {
-      els.marketStatus.textContent = ".env 找不到 FINMIND_TOKEN，FinMind 請求會以未登入模式嘗試。";
-    }
-  } catch (error) {
-    els.marketStatus.textContent = `讀取 .env 失敗：${error.message}，FinMind 請求會以未登入模式嘗試。`;
-  }
-}
-
-function parseEnv(text) {
-  return text.split(/\r?\n/).reduce((acc, line) => {
-    const trimmed = line.trim();
-    if (!trimmed || trimmed.startsWith("#")) return acc;
-    const index = trimmed.indexOf("=");
-    if (index === -1) return acc;
-    const key = trimmed.slice(0, index).trim();
-    const value = trimmed.slice(index + 1).trim().replace(/^['"]|['"]$/g, "");
-    acc[key] = value;
-    return acc;
-  }, {});
 }
 
 function aggregateTaiexRows(rows, date) {
@@ -1261,6 +1443,102 @@ function normalizeOptionRow(row) {
   };
 }
 
+function normalizeFuturesSnapshotRow(row) {
+  const futuresId = String(row.futures_id || "").toUpperCase().trim();
+  if (!futuresId.startsWith("TXF")) return null;
+  const bid = firstNumber(row.buy_price, 0);
+  const ask = firstNumber(row.sell_price, 0);
+  const close = firstNumber(row.close, bid && ask ? (bid + ask) / 2 : bid || ask);
+  const expiry = futureContractExpiry(futuresId);
+  if (!Number.isFinite(close) || close <= 0) return null;
+  return {
+    futures_id: futuresId,
+    contract: expiry ? `${expiry.getFullYear()}${String(expiry.getMonth() + 1).padStart(2, "0")}` : "",
+    close,
+    bid,
+    ask,
+    volume: firstNumber(row.total_volume, row.volume, 0),
+    date: String(row.date || ""),
+    expiry,
+  };
+}
+
+function normalizeIndexSnapshotRow(row) {
+  const stockId = String(row.stock_id || row.data_id || "").toUpperCase().trim();
+  const bid = firstNumber(row.buy_price, 0);
+  const ask = firstNumber(row.sell_price, 0);
+  const close = firstNumber(row.close, row.TAIEX, bid && ask ? (bid + ask) / 2 : bid || ask);
+  if (!Number.isFinite(close) || close <= 0) return null;
+  return {
+    stock_id: stockId,
+    close,
+    bid,
+    ask,
+    date: String(row.date || ""),
+  };
+}
+
+function normalizeOptionSnapshotRow(row) {
+  const optionsId = String(row.options_id || "").toUpperCase().trim();
+  const parsed = parseTxoOptionsId(optionsId);
+  if (!parsed) return null;
+  const bid = firstNumber(row.buy_price, 0);
+  const ask = firstNumber(row.sell_price, 0);
+  const close = firstNumber(row.close, bid && ask ? (bid + ask) / 2 : bid || ask);
+  return {
+    option_id: "TXO",
+    options_id: optionsId,
+    contract: parsed.contract,
+    strike: parsed.strike,
+    type: parsed.type,
+    open: firstNumber(row.open, 0),
+    high: firstNumber(row.high, row.max, 0),
+    low: firstNumber(row.low, row.min, 0),
+    close: Number.isFinite(close) ? Math.max(0, close) : 0,
+    bid,
+    bid_volume: firstNumber(row.buy_volume, 0),
+    ask,
+    ask_volume: firstNumber(row.sell_volume, 0),
+    volume: firstNumber(row.total_volume, row.volume, 0),
+    open_interest: 0,
+    date: String(row.date || ""),
+  };
+}
+
+function parseTxoOptionsId(optionsId) {
+  const match = String(optionsId || "").toUpperCase().match(/^TXO(\d+)([A-X])(\d)$/);
+  if (!match) return null;
+  const strike = Number(match[1]);
+  const code = match[2];
+  const yearDigit = Number(match[3]);
+  const callMonth = "ABCDEFGHIJKL".indexOf(code);
+  const putMonth = "MNOPQRSTUVWX".indexOf(code);
+  const monthIndex = callMonth >= 0 ? callMonth : putMonth;
+  if (!Number.isFinite(strike) || monthIndex < 0) return null;
+  const year = yearFromDerivativeDigit(yearDigit, monthIndex);
+  return {
+    strike,
+    type: callMonth >= 0 ? "call" : "put",
+    contract: `${year}${String(monthIndex + 1).padStart(2, "0")}`,
+  };
+}
+
+function futureContractExpiry(futuresId) {
+  const match = String(futuresId || "").toUpperCase().match(/^TXF([A-L])(\d)$/);
+  if (!match) return null;
+  const monthIndex = "ABCDEFGHIJKL".indexOf(match[1]);
+  if (monthIndex < 0) return null;
+  return thirdWednesday(yearFromDerivativeDigit(Number(match[2]), monthIndex), monthIndex);
+}
+
+function yearFromDerivativeDigit(yearDigit, monthIndex) {
+  const today = stripTime(new Date());
+  const decadeYear = Math.floor(today.getFullYear() / 10) * 10 + yearDigit;
+  return [decadeYear - 10, decadeYear, decadeYear + 10]
+    .map((year) => ({ year, distance: Math.abs(thirdWednesday(year, monthIndex) - today) }))
+    .sort((a, b) => a.distance - b.distance)[0].year;
+}
+
 function normalizeOptionId(value) {
   return String(value || "").toUpperCase().trim();
 }
@@ -1271,6 +1549,64 @@ function normalizeCallPut(value) {
   return "call";
 }
 
+function selectFrontMonthFuture(rows) {
+  const today = stripTime(new Date());
+  const activeRows = rows.filter((row) => row && row.close > 0);
+  const datedRows = activeRows
+    .filter((row) => row.expiry)
+    .sort((a, b) => a.expiry - b.expiry);
+  const frontMonth = datedRows.find((row) => row.expiry >= today);
+  if (frontMonth) return frontMonth;
+  if (datedRows.length) return datedRows[datedRows.length - 1];
+  return activeRows.sort((a, b) => b.volume - a.volume)[0] || null;
+}
+
+function selectIndexQuote(rows) {
+  return rows
+    .filter((row) => row && row.close > 0)
+    .sort((a, b) => {
+      const aIsTaiex = a.stock_id === "001" || a.stock_id === "TAIEX";
+      const bIsTaiex = b.stock_id === "001" || b.stock_id === "TAIEX";
+      if (aIsTaiex !== bIsTaiex) return aIsTaiex ? -1 : 1;
+      return String(b.date).localeCompare(String(a.date));
+    })[0] || null;
+}
+
+function setSpot(value) {
+  const parsed = number(value, NaN);
+  if (!Number.isFinite(parsed) || parsed <= 0) return;
+  state.spot = parsed;
+}
+
+function latestQuoteTime(rows) {
+  return rows
+    .map((row) => row.date)
+    .filter(Boolean)
+    .sort()
+    .at(-1) || "";
+}
+
+function optionMarkPrice(option) {
+  if (!option) return 0;
+  if (option.close > 0) return option.close;
+  if (option.bid > 0 && option.ask > 0) return (option.bid + option.ask) / 2;
+  return option.bid || option.ask || 0;
+}
+
+function tQuoteCenterPrice() {
+  return state.futuresQuote?.close || state.spot;
+}
+
+function formatQuote(value) {
+  return value > 0 ? formatNumber(value, 1) : "-";
+}
+
+function formatCacheTime(value) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleTimeString("zh-TW", { hour12: false });
+}
+
 function filteredPositions() {
   if (state.filter === "all") return state.positions;
   return state.positions.filter((position) => position.kind === state.filter);
@@ -1279,17 +1615,89 @@ function filteredPositions() {
 function positionMetrics(position) {
   const sign = position.side === "long" ? 1 : -1;
   const t = dte(position.expiry);
-  const iv = impliedVolatility(state.spot, position.strike, t, state.rate, position.market || position.premium, position.type) || 0.22;
+  const marketQuote = positionMarketQuote(position);
+  const market = marketQuote.price;
+  const iv = impliedVolatility(state.spot, position.strike, t, state.rate, market || position.premium, position.type) || 0.22;
   const greeks = blackScholesGreeks(state.spot, position.strike, t, state.rate, iv, position.type);
   const multiplier = sign * position.qty * POINT_VALUE;
   return {
-    pnl: (position.market - position.premium) * multiplier,
+    market,
+    marketSource: marketQuote.source,
+    pnl: (market - position.premium) * multiplier,
     delta: greeks.delta * multiplier,
     gamma: greeks.gamma * multiplier,
     theta: greeks.theta * multiplier,
     vega: (greeks.vega / 100) * multiplier,
     iv,
   };
+}
+
+function positionMarketPrice(position) {
+  return positionMarketQuote(position).price;
+}
+
+function positionMarketQuote(position) {
+  const snapshot = snapshotMarketQuote(position);
+  if (snapshot.price > 0) return snapshot;
+  if (position.market > 0) {
+    return { price: position.market, source: "legacy" };
+  }
+  return { price: position.premium, source: "entry" };
+}
+
+function snapshotMarketQuote(position) {
+  const contract = positionContract(position) || currentMonthContract();
+  const sameSeries = state.optionChain
+    .filter((row) => row.type === position.type)
+    .filter((row) => Math.abs(row.strike - position.strike) < 0.001);
+  const exact = sameSeries.find((row) => contract && row.contract === contract);
+  const fallback = contract ? null : sameSeries[0];
+  const quote = exact || fallback;
+  const price = optionMarkPrice(quote);
+  if (price <= 0) return { price: 0, source: "missing", contract };
+  return {
+    price,
+    source: exact ? "snapshot" : "snapshot-fallback",
+    contract: quote.contract,
+  };
+}
+
+function syncPositionMarketPrices() {
+  let changed = false;
+  state.positions = state.positions.map((position) => {
+    const quote = snapshotMarketQuote(position);
+    if (quote.price <= 0) return position;
+    const nextContract = position.contract || quote.contract || positionContract(position);
+    if (Math.abs(number(position.market, 0) - quote.price) < 0.001 && position.contract === nextContract) {
+      return position;
+    }
+    changed = true;
+    return {
+      ...position,
+      contract: nextContract,
+      market: quote.price,
+    };
+  });
+  if (changed) savePositions();
+  return changed;
+}
+
+function positionContract(position) {
+  if (position.contract) return String(position.contract);
+  return expiryToContract(position.expiry);
+}
+
+function expiryToContract(expiry) {
+  const date = parseDate(expiry);
+  if (!date) return "";
+  return `${date.getFullYear()}${String(date.getMonth() + 1).padStart(2, "0")}`;
+}
+
+function marketSourceLabel(source) {
+  if (source === "snapshot") return "FinMind 選擇權即時 snapshot";
+  if (source === "snapshot-fallback") return "FinMind snapshot：未找到相同到期月，改用同履約價近似報價";
+  if (source === "legacy") return "沿用舊部位儲存的市價，等待 FinMind snapshot";
+  return "尚無 snapshot，暫以建倉權利金估算";
 }
 
 function aggregateRisk(positions) {
@@ -1304,6 +1712,31 @@ function aggregateRisk(positions) {
   }, { pnl: 0, delta: 0, gamma: 0, theta: 0, vega: 0 });
 }
 
+function positionStrikeLevels() {
+  return unique(state.positions.map((position) => number(position.strike, NaN)).filter(Number.isFinite))
+    .sort((a, b) => a - b);
+}
+
+function payoffPriceBounds() {
+  const strikes = positionStrikeLevels();
+  if (!strikes.length) {
+    return {
+      xMin: Math.max(0, Math.floor((state.spot - 1500) / 100) * 100),
+      xMax: Math.ceil((state.spot + 1500) / 100) * 100,
+    };
+  }
+
+  const minStrike = Math.min(state.spot, strikes[0]);
+  const maxStrike = Math.max(state.spot, strikes.at(-1));
+  const strikeSpan = Math.max(500, maxStrike - minStrike);
+  const premiumSpan = state.positions.reduce((sum, position) => sum + number(position.premium, 0) * number(position.qty, 1), 0);
+  const padding = Math.max(1200, strikeSpan * 0.65, premiumSpan + 500);
+  return {
+    xMin: Math.max(0, Math.floor((minStrike - padding) / 100) * 100),
+    xMax: Math.ceil((maxStrike + padding) / 100) * 100,
+  };
+}
+
 function portfolioPayoff(underlying) {
   return state.positions.reduce((sum, position) => {
     const intrinsic = position.type === "call"
@@ -1314,10 +1747,27 @@ function portfolioPayoff(underlying) {
   }, 0);
 }
 
+function expiryPayoffExtremes() {
+  const strikes = positionStrikeLevels();
+  const criticalPrices = unique([0, ...strikes]).sort((a, b) => a - b);
+  const values = criticalPrices.length ? criticalPrices.map(portfolioPayoff) : [0];
+  const upperSlope = state.positions.reduce((sum, position) => {
+    if (position.type !== "call") return sum;
+    const sign = position.side === "long" ? 1 : -1;
+    return sum + sign * position.qty * POINT_VALUE;
+  }, 0);
+
+  return {
+    maxProfit: upperSlope > 0 ? Infinity : Math.max(...values),
+    maxLoss: upperSlope < 0 ? -Infinity : Math.min(...values),
+  };
+}
+
 function portfolioTheoryPnl(underlying) {
   return state.positions.reduce((sum, position) => {
     const t = dte(position.expiry);
-    const iv = impliedVolatility(state.spot, position.strike, t, state.rate, position.market || position.premium, position.type) || 0.22;
+    const market = positionMarketPrice(position);
+    const iv = impliedVolatility(state.spot, position.strike, t, state.rate, market || position.premium, position.type) || 0.22;
     const price = blackScholesPrice(underlying, position.strike, t, state.rate, iv, position.type);
     const sign = position.side === "long" ? 1 : -1;
     return sum + (price - position.premium) * sign * position.qty * POINT_VALUE;
@@ -1386,17 +1836,55 @@ function erf(x) {
   return sign * y;
 }
 
-function groupOptionChain(rows) {
+function groupOptionChain(rows, options = {}) {
+  const { contract = "", range = 1200, center = state.spot } = options;
   const byStrike = new Map();
-  rows.forEach((row) => {
+  rows.filter((row) => !contract || row.contract === contract).forEach((row) => {
     if (!byStrike.has(row.strike)) byStrike.set(row.strike, { strike: row.strike, contract: row.contract });
     const target = byStrike.get(row.strike);
     target.contract = target.contract || row.contract;
     target[row.type] = row;
   });
   return Array.from(byStrike.values())
-    .filter((row) => Math.abs(row.strike - state.spot) <= 1200)
+    .filter((row) => Math.abs(row.strike - center) <= range)
     .sort((a, b) => a.strike - b.strike);
+}
+
+function tQuoteStrikeStatus(rows) {
+  const strikes = rows.map((row) => row.strike).filter(Number.isFinite);
+  if (strikes.length < 2) return "履約價間距待確認";
+  const gaps = [];
+  for (let index = 1; index < strikes.length; index += 1) {
+    gaps.push(strikes[index] - strikes[index - 1]);
+  }
+  const minGap = Math.min(...gaps);
+  const maxGap = Math.max(...gaps);
+  const distinctGaps = unique(gaps).sort((a, b) => a - b);
+  const gapText = distinctGaps.length <= 3
+    ? distinctGaps.map((gap) => `${gap}點`).join("/")
+    : `${minGap}-${maxGap}點`;
+  return `履約價 ${formatNumber(strikes[0], 0)}-${formatNumber(strikes.at(-1), 0)} / 實際間距 ${gapText}`;
+}
+
+function currentMonthContract() {
+  const contracts = unique(state.optionChain.map((row) => row.contract).filter(Boolean));
+  if (!contracts.length) return "";
+  const monthlyContracts = contracts.filter((contract) => /^\d{6}$/.test(contract));
+  const candidates = monthlyContracts.length ? monthlyContracts : contracts;
+  if (state.futuresQuote?.contract && candidates.includes(state.futuresQuote.contract)) {
+    return state.futuresQuote.contract;
+  }
+
+  const today = stripTime(new Date());
+  const withExpiry = candidates
+    .map((contract) => ({ contract, expiry: contractToExpiry(contract) }))
+    .filter((item) => item.expiry)
+    .sort((a, b) => a.expiry - b.expiry);
+  const frontMonth = withExpiry.find((item) => item.expiry >= today);
+  if (frontMonth) return frontMonth.contract;
+  if (withExpiry.length) return withExpiry[withExpiry.length - 1].contract;
+
+  return candidates.sort()[0];
 }
 
 function optionChainStats() {
@@ -1406,8 +1894,8 @@ function optionChainStats() {
     return Math.abs(row.strike - state.spot) < Math.abs(best.strike - state.spot) ? row : best;
   }, grouped[0]);
   const t = dteFromContract(atm.contract);
-  const callIv = atm.call ? impliedVolatility(state.spot, atm.strike, t, state.rate, atm.call.close, "call") : null;
-  const putIv = atm.put ? impliedVolatility(state.spot, atm.strike, t, state.rate, atm.put.close, "put") : null;
+  const callIv = atm.call ? impliedVolatility(state.spot, atm.strike, t, state.rate, optionMarkPrice(atm.call), "call") : null;
+  const putIv = atm.put ? impliedVolatility(state.spot, atm.strike, t, state.rate, optionMarkPrice(atm.put), "put") : null;
   return {
     atmIv: average([callIv, putIv].filter(Boolean)),
     skew: callIv && putIv ? putIv - callIv : null,
@@ -1545,7 +2033,7 @@ function findBreakevens(points) {
 }
 
 function contractLabel(position) {
-  const ym = position.expiry ? position.expiry.slice(0, 7).replace("-", "") : "TXO";
+  const ym = positionContract(position) || "TXO";
   return `TXO ${ym} ${position.strike}${position.type === "call" ? "C" : "P"}`;
 }
 
@@ -1577,6 +2065,14 @@ function contractToExpiry(contract) {
   const month = Number(digits.slice(4, 6)) - 1;
   if (!year || month < 0) return null;
   return thirdWednesday(year, month);
+}
+
+function frontMonthExpiry(date) {
+  const today = stripTime(date);
+  const currentMonthExpiry = thirdWednesday(today.getFullYear(), today.getMonth());
+  return currentMonthExpiry >= today
+    ? currentMonthExpiry
+    : thirdWednesday(today.getFullYear(), today.getMonth() + 1);
 }
 
 function thirdWednesday(year, monthIndex) {
@@ -1637,7 +2133,10 @@ function sameDate(a, b) {
 
 function parseDate(value) {
   if (!value) return null;
-  const date = new Date(`${value}T00:00:00`);
+  if (value instanceof Date) return Number.isNaN(value.getTime()) ? null : stripTime(value);
+  const text = String(value);
+  const normalized = normalizeDateValue(text);
+  const date = normalized ? new Date(`${normalized}T00:00:00`) : new Date(text);
   return Number.isNaN(date.getTime()) ? null : stripTime(date);
 }
 
@@ -1670,10 +2169,10 @@ function sampleIndexCandles() {
 }
 
 function sampleOptionChain() {
-  const expiry = thirdWednesday(new Date().getFullYear(), new Date().getMonth() + 1);
+  const expiry = frontMonthExpiry(new Date());
   const contract = `${expiry.getFullYear()}${String(expiry.getMonth() + 1).padStart(2, "0")}`;
   const rows = [];
-  for (let strike = 21400; strike <= 23800; strike += 200) {
+  for (let strike = 19600; strike <= 25600; strike += SAMPLE_MONTHLY_STRIKE_STEP) {
     const distance = Math.abs(strike - state.spot);
     const base = Math.max(28, 240 - distance * 0.14);
     rows.push({
@@ -1681,18 +2180,22 @@ function sampleOptionChain() {
       contract,
       strike,
       type: "call",
+      bid: Math.max(0, base + (state.spot - strike) * 0.22 - 1),
+      ask: Math.max(0, base + (state.spot - strike) * 0.22 + 1),
       close: Math.max(8, base + (state.spot - strike) * 0.22),
-      volume: Math.round(3500 - distance * 1.2 + Math.random() * 240),
-      open_interest: Math.round(6200 - distance * 1.5 + Math.random() * 700),
+      volume: Math.max(0, Math.round(3500 - distance * 1.2 + Math.random() * 240)),
+      open_interest: Math.max(0, Math.round(6200 - distance * 1.5 + Math.random() * 700)),
     });
     rows.push({
       option_id: "TXO",
       contract,
       strike,
       type: "put",
+      bid: Math.max(0, base + (strike - state.spot) * 0.24 - 1),
+      ask: Math.max(0, base + (strike - state.spot) * 0.24 + 1),
       close: Math.max(8, base + (strike - state.spot) * 0.24),
-      volume: Math.round(3600 - distance * 1.1 + Math.random() * 260),
-      open_interest: Math.round(6600 - distance * 1.3 + Math.random() * 760),
+      volume: Math.max(0, Math.round(3600 - distance * 1.1 + Math.random() * 260)),
+      open_interest: Math.max(0, Math.round(6600 - distance * 1.3 + Math.random() * 760)),
     });
   }
   return rows;
