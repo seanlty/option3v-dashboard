@@ -147,35 +147,47 @@
         <section class="panel market-panel">
           <div class="panel-header">
             <div>
-              <h2>加權指數日線</h2>
+              <h2>走勢圖</h2>
               <p>歷史資料使用日線端點；最新交易日再用 TAIEX 五秒資料重建當日 K。</p>
             </div>
-            <span class="provider-note">Chart by TradingView Lightweight Charts</span>
-          </div>
-          <div class="data-controls">
-            <label>
-              <span>開始日</span>
-              <input id="startDateInput" type="date" />
-            </label>
-            <label>
-              <span>結束日</span>
-              <input id="endDateInput" type="date" />
-            </label>
-            <button id="fetchIndexBtn" type="button" class="secondary-action">抓取日線</button>
-          </div>
-          <div id="indexChart" class="chart-stack">
-            <div id="priceChart" class="chart-area chart-main"></div>
-            <div id="eventLane" class="event-lane" aria-label="圖表事件列"></div>
-            <div class="score-chart-shell">
-              <div class="score-chart-title">OP Score 每日評分</div>
-              <div id="scoreChart" class="chart-area chart-score"></div>
-            </div>
-            <div class="score-chart-shell">
-              <div class="score-chart-title">OP Score 日變化</div>
-              <div id="scoreDeltaChart" class="chart-area chart-score chart-delta"></div>
+            <div class="panel-tabs" role="tablist" aria-label="行情圖表切換">
+              <button type="button" class="active" data-market-tab="index">加權指數</button>
+              <button type="button" data-market-tab="futures1m">台指期</button>
             </div>
           </div>
-          <p id="marketStatus" class="status-line">尚未連線 FinMind，先顯示示範日線。</p>
+          <div id="marketIndexPane" class="tab-pane active">
+            <div class="data-controls">
+              <label>
+                <span>開始日</span>
+                <input id="startDateInput" type="date" />
+              </label>
+              <label>
+                <span>結束日</span>
+                <input id="endDateInput" type="date" />
+              </label>
+              <button id="fetchIndexBtn" type="button" class="secondary-action">抓取日線</button>
+              <span class="provider-note">Chart by TradingView Lightweight Charts</span>
+            </div>
+            <div id="indexChart" class="chart-stack">
+              <div id="priceChart" class="chart-area chart-main"></div>
+              <div id="eventLane" class="event-lane" aria-label="圖表事件列"></div>
+              <div class="score-chart-shell">
+                <div class="score-chart-title">OP Score 每日評分</div>
+                <div id="scoreChart" class="chart-area chart-score"></div>
+              </div>
+              <div class="score-chart-shell">
+                <div class="score-chart-title">OP Score 日變化</div>
+                <div id="scoreDeltaChart" class="chart-area chart-score chart-delta"></div>
+              </div>
+            </div>
+            <p id="marketStatus" class="status-line">尚未連線 FinMind，先顯示示範日線。</p>
+          </div>
+          <div id="marketFuturesPane" class="tab-pane" hidden>
+            <div class="placeholder-panel">
+              <strong>台指期貨每日早盤 1 分K</strong>
+              <span>歷史資料回溯與早盤 1 分 K 圖將接在這個頁籤。</span>
+            </div>
+          </div>
         </section>
 
         <section class="panel option-chain-panel">
@@ -184,87 +196,72 @@
               <h2>自動化交易選擇權部位</h2>
               <p>本合約周期每日建立部位與損益追蹤。</p>
             </div>
-            <button id="fetchOptionsBtn" type="button" class="secondary-action">同步報價快取</button>
-          </div>
-          <div class="automation-placeholders">
-            <div>
-              <span>合約口數</span>
-              <strong>待設定</strong>
-            </div>
-            <div>
-              <span>買賣方</span>
-              <strong>待設定</strong>
-            </div>
-            <div>
-              <span>交易方向</span>
-              <strong>待設定</strong>
+            <div class="panel-tabs" role="tablist" aria-label="自動化交易部位切換">
+              <button type="button" class="active" data-automation-tab="current">本期部位</button>
+              <button type="button" data-automation-tab="history">歷史回朔</button>
             </div>
           </div>
-          <div class="table-wrap compact-table automation-log-wrap">
-            <table class="automation-table">
-              <thead>
-                <tr>
-                  <th>日期</th>
-                  <th>契約</th>
-                  <th>買賣</th>
-                  <th>方向</th>
-                  <th>口數</th>
-                  <th>建倉價</th>
-                  <th>市價</th>
-                  <th>日損益</th>
-                  <th>累計損益</th>
-                </tr>
-              </thead>
-              <tbody id="optionChainBody"></tbody>
-            </table>
-          </div>
-          <p id="optionStatus" class="status-line">等待本機報價快取同步。</p>
-        </section>
-
-        <section class="panel strategy-panel">
-          <div class="panel-header">
-            <div>
-              <h2>3V策略表</h2>
-              <p>View 方向、Volatility 波動率、Time-Value 時間價值。</p>
+          <div id="automationCurrentPane" class="tab-pane active">
+            <div class="automation-placeholders">
+              <div>
+                <span>合約口數</span>
+                <strong>待設定</strong>
+              </div>
+              <div>
+                <span>買賣方</span>
+                <strong>待設定</strong>
+              </div>
+              <div>
+                <span>交易方向</span>
+                <strong>待設定</strong>
+              </div>
             </div>
+            <div class="table-wrap compact-table automation-log-wrap">
+              <table class="automation-table">
+                <thead>
+                  <tr>
+                    <th>日期</th>
+                    <th>契約</th>
+                    <th>買賣</th>
+                    <th>方向</th>
+                    <th>口數</th>
+                    <th>建倉價</th>
+                    <th>市價</th>
+                    <th>日損益</th>
+                    <th>累計損益</th>
+                  </tr>
+                </thead>
+                <tbody id="optionChainBody"></tbody>
+              </table>
+            </div>
+            <p id="optionStatus" class="status-line">等待 Fugle 自動化部位即時報價串接。</p>
           </div>
-          <div class="strategy-filters">
-            <label>
-              <span>View 方向</span>
-              <select id="strategyViewFilter">
-                <option value="all">全部方向</option>
-              </select>
-            </label>
-            <label>
-              <span>Volatility 波動率</span>
-              <select id="strategyVolFilter">
-                <option value="all">全部波動率</option>
-              </select>
-            </label>
-            <label>
-              <span>Time-Value 時間價值</span>
-              <select id="strategyTimeFilter">
-                <option value="all">全部時間價值</option>
-              </select>
-            </label>
-          </div>
-          <p id="strategyStatus" class="status-line"></p>
-          <div class="table-wrap strategy-table-wrap">
-            <table class="strategy-table">
-              <thead>
-                <tr>
-                  <th>編號</th>
-                  <th>盤勢</th>
-                  <th>波動率</th>
-                  <th>到期效應</th>
-                  <th>方向</th>
-                  <th>波動率</th>
-                  <th>時間</th>
-                  <th>交易策略</th>
-                </tr>
-              </thead>
-              <tbody id="strategyBody"></tbody>
-            </table>
+          <div id="automationHistoryPane" class="tab-pane" hidden>
+            <div class="automation-history-controls">
+              <label>
+                <span>歷史合約月份</span>
+                <select id="automationHistoryContractSelect"></select>
+              </label>
+            </div>
+            <div class="table-wrap compact-table automation-log-wrap">
+              <table class="automation-table">
+                <thead>
+                  <tr>
+                    <th>日期</th>
+                    <th>契約</th>
+                    <th>買賣</th>
+                    <th>方向</th>
+                    <th>口數</th>
+                    <th>建倉價</th>
+                    <th>市價</th>
+                    <th>日損益</th>
+                    <th>累計損益</th>
+                  </tr>
+                </thead>
+                <tbody id="automationHistoryBody"></tbody>
+              </table>
+            </div>
+            <p id="automationHistoryStatus" class="status-line">選擇歷史合約月份後，部位回朔載入邏輯後續補上。</p>
           </div>
         </section>
 
@@ -276,24 +273,48 @@
             </div>
             <span id="tQuoteStatus" class="provider-note">讀取中...</span>
           </div>
+          <div class="t-vix-panel">
+            <div class="t-vix-header">
+              <div>
+                <span>台指選擇權波動率 VIX 速算</span>
+                <strong id="tVixValue">--</strong>
+              </div>
+              <small id="tVixMeta">等待 Fugle live IV 樣本...</small>
+            </div>
+            <canvas id="tVixChart" width="1200" height="180" aria-label="台指選擇權波動率 VIX 速算走勢"></canvas>
+          </div>
           <div class="table-wrap t-quote-wrap">
             <table class="t-quote-table">
               <thead>
                 <tr>
-                  <th colspan="4">Call</th>
+                  <th colspan="11">Call</th>
                   <th class="strike-heading">履約價</th>
-                  <th colspan="4">Put</th>
+                  <th colspan="11">Put</th>
                 </tr>
                 <tr>
-                  <th>量</th>
-                  <th>賣價</th>
+                  <th>成交量</th>
+                  <th>Last</th>
+                  <th>買量</th>
                   <th>買價</th>
-                  <th>成交</th>
+                  <th>賣價</th>
+                  <th>賣量</th>
+                  <th>IV</th>
+                  <th>Delta</th>
+                  <th>Gamma</th>
+                  <th>Theta</th>
+                  <th>Vega</th>
                   <th class="strike-heading">Strike</th>
-                  <th>成交</th>
+                  <th>Vega</th>
+                  <th>Theta</th>
+                  <th>Gamma</th>
+                  <th>Delta</th>
+                  <th>IV</th>
+                  <th>買量</th>
                   <th>買價</th>
                   <th>賣價</th>
-                  <th>量</th>
+                  <th>賣量</th>
+                  <th>Last</th>
+                  <th>成交量</th>
                 </tr>
               </thead>
               <tbody id="tQuoteBody"></tbody>
@@ -318,9 +339,55 @@
               <h2>盤勢判別建議</h2>
               <p>根據趨勢、波動率、偏斜與部位 Greeks 給出輔助判斷。</p>
             </div>
+            <div class="panel-tabs" role="tablist" aria-label="盤勢區塊切換">
+              <button type="button" class="active" data-regime-tab="decision">盤勢判別</button>
+              <button type="button" data-regime-tab="strategy">3V策略表</button>
+            </div>
           </div>
-          <div id="riskSummary" class="risk-summary"></div>
-          <div id="regimeAdvice" class="advice-box"></div>
+          <div id="regimeDecisionPane" class="tab-pane active">
+            <div id="regimeFramework" class="regime-framework"></div>
+            <div id="regimeAdvice" class="advice-box"></div>
+          </div>
+          <div id="regimeStrategyPane" class="tab-pane" hidden>
+            <div class="strategy-filters">
+              <label>
+                <span>View 方向</span>
+                <select id="strategyViewFilter">
+                  <option value="all">全部方向</option>
+                </select>
+              </label>
+              <label>
+                <span>Volatility 波動率</span>
+                <select id="strategyVolFilter">
+                  <option value="all">全部波動率</option>
+                </select>
+              </label>
+              <label>
+                <span>Time-Value 時間價值</span>
+                <select id="strategyTimeFilter">
+                  <option value="all">全部時間價值</option>
+                </select>
+              </label>
+            </div>
+            <p id="strategyStatus" class="status-line"></p>
+            <div class="table-wrap strategy-table-wrap">
+              <table class="strategy-table">
+                <thead>
+                  <tr>
+                    <th>編號</th>
+                    <th>盤勢</th>
+                    <th>波動率</th>
+                    <th>到期效應</th>
+                    <th>方向</th>
+                    <th>波動率</th>
+                    <th>時間</th>
+                    <th>交易策略</th>
+                  </tr>
+                </thead>
+                <tbody id="strategyBody"></tbody>
+              </table>
+            </div>
+          </div>
         </section>
       </main>
     </div>

@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import threading
+import time
 from datetime import datetime, timezone
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -12,6 +13,11 @@ from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 import requests
+
+try:
+    from .fugle_live import FugleLiveTQuoteService
+except ImportError:  # pragma: no cover - supports `python src/main.py`.
+    from fugle_live import FugleLiveTQuoteService
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -22,6 +28,10 @@ TAIEX_DATA_ID = "TAIEX"
 
 
 def load_env_token() -> str:
+    return load_env_value("FINMIND_TOKEN")
+
+
+def load_env_value(target_key: str) -> str:
     env_path = ROOT / ".env"
     if not env_path.exists():
         return ""
@@ -30,7 +40,7 @@ def load_env_token() -> str:
         if not stripped or stripped.startswith("#") or "=" not in stripped:
             continue
         key, value = stripped.split("=", 1)
-        if key.strip() == "FINMIND_TOKEN":
+        if key.strip() == target_key:
             return value.strip().strip("'\"")
     return ""
 
@@ -225,6 +235,7 @@ def latest_trading_date(rows: list[dict[str, Any]], start_date: str, end_date: s
 
 
 QUOTE_CACHE = QuoteCache(load_env_token())
+FUGLE_TQUOTE = FugleLiveTQuoteService(load_env_value("FUGLE_TOKEN"))
 
 
 class DashboardHandler(SimpleHTTPRequestHandler):
@@ -238,6 +249,12 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             force = query.get("force", ["0"])[0] == "1"
             payload = QUOTE_CACHE.refresh() if force or not QUOTE_CACHE.snapshot().get("updated_at") else QUOTE_CACHE.snapshot()
             self._send_json(payload)
+            return
+        if parsed.path == "/api/fugle-tquote":
+            self._send_json(FUGLE_TQUOTE.snapshot())
+            return
+        if parsed.path == "/api/fugle-tquote-events":
+            self._send_event_stream()
             return
         if parsed.path == "/api/index-candles":
             query = parse_qs(parsed.query)
@@ -266,9 +283,26 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _send_event_stream(self) -> None:
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Connection", "keep-alive")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.end_headers()
+        while True:
+            try:
+                payload = json.dumps(FUGLE_TQUOTE.snapshot(), ensure_ascii=False)
+                self.wfile.write(f"data: {payload}\n\n".encode("utf-8"))
+                self.wfile.flush()
+                time.sleep(1)
+            except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+                break
+
 
 def run_server(host: str, port: int) -> None:
     QUOTE_CACHE.start()
+    FUGLE_TQUOTE.start()
     server = ThreadingHTTPServer((host, port), DashboardHandler)
     print(f"option dashboard server running at http://{host}:{port}/")
     try:

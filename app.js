@@ -32,6 +32,12 @@ const state = {
   automationPositions: [],
   futuresQuote: null,
   futuresQuotes: [],
+  fugleTQuote: null,
+  fugleTQuoteEventSource: null,
+  tVixResizeFrame: null,
+  activeMarketTab: "index",
+  activeRegimeTab: "decision",
+  activeAutomationTab: "current",
   indexQuote: null,
   indexChart: null,
   scoreChart: null,
@@ -39,6 +45,7 @@ const state = {
   candleSeries: null,
   scoreSeries: null,
   scoreDeltaSeries: null,
+  indexVisibleRangeKey: "",
   chartsSynced: false,
   crosshairsSynced: false,
   isSyncingChartRange: false,
@@ -70,10 +77,12 @@ document.addEventListener("DOMContentLoaded", () => {
   loadSettlementDates().then(renderAll);
   fetchIndexCandles({ auto: true });
   fetchRealtimeQuotes({ auto: true });
+  connectFugleTQuote();
   window.setInterval(() => fetchRealtimeQuotes({ auto: true, refresh: true }), QUOTE_POLL_MS);
   window.addEventListener("resize", () => {
     drawPayoff();
     scheduleIndexChartResize();
+    scheduleTQuoteVixChartResize();
   });
 });
 
@@ -107,10 +116,17 @@ function bindElements() {
     fetchOptionsBtn: document.querySelector("#fetchOptionsBtn"),
     optionChainBody: document.querySelector("#optionChainBody"),
     optionStatus: document.querySelector("#optionStatus"),
+    automationCurrentPane: document.querySelector("#automationCurrentPane"),
+    automationHistoryPane: document.querySelector("#automationHistoryPane"),
+    automationHistoryContractSelect: document.querySelector("#automationHistoryContractSelect"),
+    automationHistoryBody: document.querySelector("#automationHistoryBody"),
+    automationHistoryStatus: document.querySelector("#automationHistoryStatus"),
     settlementCalendar: document.querySelector("#settlementCalendar"),
     calendarList: document.querySelector("#calendarList"),
-    riskSummary: document.querySelector("#riskSummary"),
+    regimeFramework: document.querySelector("#regimeFramework"),
     regimeAdvice: document.querySelector("#regimeAdvice"),
+    regimeDecisionPane: document.querySelector("#regimeDecisionPane"),
+    regimeStrategyPane: document.querySelector("#regimeStrategyPane"),
     strategyBody: document.querySelector("#strategyBody"),
     strategyStatus: document.querySelector("#strategyStatus"),
     strategyViewFilter: document.querySelector("#strategyViewFilter"),
@@ -118,6 +134,11 @@ function bindElements() {
     strategyTimeFilter: document.querySelector("#strategyTimeFilter"),
     tQuoteBody: document.querySelector("#tQuoteBody"),
     tQuoteStatus: document.querySelector("#tQuoteStatus"),
+    tVixValue: document.querySelector("#tVixValue"),
+    tVixMeta: document.querySelector("#tVixMeta"),
+    tVixChart: document.querySelector("#tVixChart"),
+    marketIndexPane: document.querySelector("#marketIndexPane"),
+    marketFuturesPane: document.querySelector("#marketFuturesPane"),
   });
 }
 
@@ -143,15 +164,56 @@ function bindEvents() {
     });
   });
   els.fetchIndexBtn.addEventListener("click", fetchIndexCandles);
-  els.fetchOptionsBtn.addEventListener("click", fetchRealtimeQuotes);
+  els.fetchOptionsBtn?.addEventListener("click", fetchRealtimeQuotes);
   els.positionsBody.addEventListener("click", handlePositionAction);
-  els.optionChainBody.addEventListener("click", handleChainAction);
+  els.optionChainBody?.addEventListener("click", handleChainAction);
   els.tQuoteBody.addEventListener("click", handleChainAction);
+  els.automationHistoryContractSelect?.addEventListener("change", renderAutomationHistoryTable);
   els.strategyViewFilter.addEventListener("change", handleStrategyFilterChange);
   els.strategyVolFilter.addEventListener("change", handleStrategyFilterChange);
   els.strategyTimeFilter.addEventListener("change", handleStrategyFilterChange);
+  document.querySelectorAll("[data-market-tab]").forEach((button) => {
+    button.addEventListener("click", () => switchMarketTab(button.dataset.marketTab));
+  });
+  document.querySelectorAll("[data-regime-tab]").forEach((button) => {
+    button.addEventListener("click", () => switchRegimeTab(button.dataset.regimeTab));
+  });
+  document.querySelectorAll("[data-automation-tab]").forEach((button) => {
+    button.addEventListener("click", () => switchAutomationTab(button.dataset.automationTab));
+  });
   populateStrategyFilters();
   observeIndexChartSize();
+}
+
+function switchMarketTab(tab) {
+  state.activeMarketTab = tab || "index";
+  document.querySelectorAll("[data-market-tab]").forEach((button) => {
+    button.classList.toggle("active", button.dataset.marketTab === state.activeMarketTab);
+  });
+  const showIndex = state.activeMarketTab === "index";
+  if (els.marketIndexPane) els.marketIndexPane.hidden = !showIndex;
+  if (els.marketFuturesPane) els.marketFuturesPane.hidden = showIndex;
+  if (showIndex) scheduleIndexChartResize();
+}
+
+function switchRegimeTab(tab) {
+  state.activeRegimeTab = tab || "decision";
+  document.querySelectorAll("[data-regime-tab]").forEach((button) => {
+    button.classList.toggle("active", button.dataset.regimeTab === state.activeRegimeTab);
+  });
+  const showDecision = state.activeRegimeTab === "decision";
+  if (els.regimeDecisionPane) els.regimeDecisionPane.hidden = !showDecision;
+  if (els.regimeStrategyPane) els.regimeStrategyPane.hidden = showDecision;
+}
+
+function switchAutomationTab(tab) {
+  state.activeAutomationTab = tab || "current";
+  document.querySelectorAll("[data-automation-tab]").forEach((button) => {
+    button.classList.toggle("active", button.dataset.automationTab === state.activeAutomationTab);
+  });
+  const showCurrent = state.activeAutomationTab === "current";
+  if (els.automationCurrentPane) els.automationCurrentPane.hidden = !showCurrent;
+  if (els.automationHistoryPane) els.automationHistoryPane.hidden = showCurrent;
 }
 
 function setDefaultDates() {
@@ -170,11 +232,15 @@ function setDefaultDates() {
 }
 
 function defaultIndexStartDate(today) {
-  const sixMonthsAgo = new Date(today.getFullYear(), today.getMonth() - 6, today.getDate());
-  const threshold = toDateInput(sixMonthsAgo);
-  return settlementDates().find((date) => date >= threshold)
-    || settlementDates()[0]
-    || threshold;
+  return lastSettlementDateOfYear(2025) || toDateInput(addDays(today, -120));
+}
+
+function lastSettlementDateOfYear(year) {
+  const prefix = `${year}-`;
+  return settlementDates()
+    .filter((date) => date.startsWith(prefix))
+    .sort()
+    .at(-1);
 }
 
 async function loadSettlementDates() {
@@ -265,8 +331,11 @@ function renderAll() {
   drawPayoff();
   renderIndexChart();
   renderOptionChain();
+  populateAutomationHistoryContracts();
+  renderAutomationHistoryTable();
   renderStrategyTable();
   renderTQuoteTable();
+  drawTQuoteVixChart();
   renderCalendar();
   renderRiskAndAdvice();
 }
@@ -676,10 +745,8 @@ function renderIndexChart() {
   resizeIndexChart();
   syncIndexChartRanges();
   syncIndexCrosshairs();
-  state.indexChart.timeScale().fitContent();
-  state.scoreChart.timeScale().fitContent();
-  state.scoreDeltaChart.timeScale().fitContent();
   applySettlementTimeScalePadding();
+  fitIndexChartToDataIfNeeded();
   requestAnimationFrame(() => requestAnimationFrame(renderEventLane));
 }
 
@@ -796,14 +863,25 @@ function syncIndexCrosshairs() {
 }
 
 function applySettlementTimeScalePadding() {
-  const hasFutureSettlement = settlementMarkerDates().some((date) => date > (els.endDateInput?.value || ""));
   const options = {
-    rightOffset: hasFutureSettlement ? 6 : 2,
-    barSpacing: 11,
+    rightOffset: 0,
+    barSpacing: 8,
   };
   state.indexChart.timeScale().applyOptions(options);
   state.scoreChart.timeScale().applyOptions(options);
   state.scoreDeltaChart.timeScale().applyOptions(options);
+}
+
+function fitIndexChartToDataIfNeeded() {
+  const first = state.indexCandles[0]?.time || "";
+  const last = state.indexCandles.at(-1)?.time || "";
+  const key = `${first}:${last}:${state.indexCandles.length}`;
+  if (!first || state.indexVisibleRangeKey === key) return;
+  state.indexVisibleRangeKey = key;
+  requestAnimationFrame(() => {
+    [state.indexChart, state.scoreChart, state.scoreDeltaChart].forEach((chart) => chart?.timeScale().fitContent());
+    requestAnimationFrame(renderEventLane);
+  });
 }
 
 function candlesWithSettlementWhitespace(candles) {
@@ -822,18 +900,12 @@ function scoresWithSettlementWhitespace(scores, candles) {
 }
 
 function settlementMarkerDates() {
-  const today = toDateInput(new Date());
   const startDate = els.startDateInput?.value || "";
   const endDate = els.endDateInput?.value || "";
-  const dates = settlementDates();
-  const occurredInRange = dates
+  return settlementDates()
     .filter((date) => date >= startDate)
     .filter((date) => !endDate || date <= endDate)
-    .filter((date) => date <= today);
-  const upcoming = dates
-    .filter((date) => date >= startDate)
-    .find((date) => date > today);
-  return unique(upcoming ? [...occurredInRange, upcoming] : occurredInRange);
+    .filter((date, index, dates) => dates.indexOf(date) === index);
 }
 
 function chartEvents() {
@@ -974,6 +1046,7 @@ function deltaColor(value) {
 }
 
 function renderOptionChain() {
+  if (!els.optionChainBody) return;
   const rows = state.automationPositions;
   els.optionChainBody.innerHTML = rows.map((row) => {
     const dailyClass = row.dailyPnl >= 0 ? "positive" : "negative";
@@ -998,51 +1071,259 @@ function renderOptionChain() {
   }
 }
 
-function renderTQuoteTable() {
-  const contract = currentMonthContract();
-  if (!contract) {
-    els.tQuoteStatus.textContent = "目前沒有可用的近月選擇權資料";
-    els.tQuoteBody.innerHTML = `<tr><td colspan="9">尚無選擇權鏈資料。</td></tr>`;
-    return;
+function populateAutomationHistoryContracts() {
+  const select = els.automationHistoryContractSelect;
+  if (!select) return;
+  const previous = select.value;
+  const options = historicalAutomationContracts();
+  select.innerHTML = options.map((contract) => `<option value="${contract}">${contract}</option>`).join("");
+  if (previous && options.includes(previous)) {
+    select.value = previous;
   }
+}
 
-  const centerPrice = tQuoteCenterPrice();
-  const grouped = groupOptionChain(state.optionChain, { contract, center: centerPrice, range: T_QUOTE_STRIKE_RANGE });
-  if (!grouped.length) {
-    els.tQuoteStatus.textContent = `${contract} 近月`;
-    els.tQuoteBody.innerHTML = `<tr><td colspan="9">此契約沒有落在期貨價格上下 ${formatNumber(T_QUOTE_STRIKE_RANGE, 0)} 點內的履約價資料。</td></tr>`;
+function historicalAutomationContracts() {
+  const todayText = toDateInput(new Date());
+  return settlementDates()
+    .filter((date) => date < todayText)
+    .map((date) => date.slice(0, 7).replace("-", ""))
+    .filter((contract, index, contracts) => contracts.indexOf(contract) === index)
+    .sort((a, b) => b.localeCompare(a));
+}
+
+function renderAutomationHistoryTable() {
+  if (!els.automationHistoryBody) return;
+  const contract = els.automationHistoryContractSelect?.value || historicalAutomationContracts()[0] || "";
+  els.automationHistoryBody.innerHTML = `<tr><td colspan="9">歷史合約 ${contract || "--"} 的自動化部位回朔載入邏輯後續補上。</td></tr>`;
+  if (els.automationHistoryStatus) {
+    els.automationHistoryStatus.textContent = contract
+      ? `${contract} 歷史回朔資料載入邏輯後續補上。`
+      : "尚無可選擇的歷史合約月份。";
+  }
+}
+
+function connectFugleTQuote() {
+  fetchFugleTQuoteSnapshot();
+  if (!window.EventSource) {
+    els.tQuoteStatus.textContent = "瀏覽器不支援 EventSource，改用手動刷新。";
     return;
   }
-  const atm = grouped.reduce((best, row) => {
-    return Math.abs(row.strike - centerPrice) < Math.abs(best.strike - centerPrice) ? row : best;
-  }, grouped[0]);
-  const expiry = contractToExpiry(contract);
-  const dteText = expiry ? ` / ${Math.max(0, businessDaysBetween(stripTime(new Date()), expiry))}D` : "";
-  const futureText = state.futuresQuote
-    ? `近月台指期 ${formatNumber(state.futuresQuote.close, 0)}（${state.futuresQuote.futures_id}）`
-    : `中心價 ${formatNumber(centerPrice, 0)}`;
-  const strikeStatus = tQuoteStrikeStatus(grouped);
-  els.tQuoteStatus.textContent = `${contract} 近月${dteText} / ${futureText} / ${strikeStatus}`;
-  els.tQuoteBody.innerHTML = grouped.map((row) => {
+  if (state.fugleTQuoteEventSource) {
+    state.fugleTQuoteEventSource.close();
+  }
+  const source = new EventSource("/api/fugle-tquote-events");
+  state.fugleTQuoteEventSource = source;
+  source.onmessage = (event) => {
+    try {
+      applyFugleTQuotePayload(JSON.parse(event.data));
+    } catch (error) {
+      els.tQuoteStatus.textContent = `Fugle live payload 解析失敗：${error.message}`;
+    }
+  };
+  source.onerror = () => {
+    els.tQuoteStatus.textContent = "Fugle live 連線中斷，等待重新連線...";
+  };
+}
+
+async function fetchFugleTQuoteSnapshot() {
+  try {
+    const response = await fetch("/api/fugle-tquote", { cache: "no-store" });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    applyFugleTQuotePayload(await response.json());
+  } catch (error) {
+    els.tQuoteStatus.textContent = `Fugle T 型報價尚未可用：${error.message}`;
+  }
+}
+
+function applyFugleTQuotePayload(payload) {
+  state.fugleTQuote = payload;
+  renderTQuoteTable();
+  drawTQuoteVixChart();
+}
+
+function renderTQuoteTable() {
+  const payload = state.fugleTQuote;
+  if (!payload) {
+    els.tQuoteStatus.textContent = "正在連線 Fugle live T 型報價...";
+    els.tQuoteBody.innerHTML = `<tr><td colspan="23">正在連線 Fugle live T 型報價...</td></tr>`;
+    renderTQuoteVixSummary();
+    return;
+  }
+  if (payload.error) {
+    els.tQuoteStatus.textContent = `Fugle live：${payload.status || "error"} / ${payload.error}`;
+  }
+  const rows = payload.rows || [];
+  const contract = payload.contract || "TXO";
+  const futureText = payload.future_symbol && payload.future_price
+    ? `${payload.future_symbol} ${formatNumber(payload.future_price, 0)}`
+    : "中心期貨讀取中";
+  const sessionText = payload.after_hours ? "夜盤" : "日盤";
+  const eventText = payload.event_counts
+    ? Object.entries(payload.event_counts).map(([key, value]) => `${key}:${value}`).join(" ")
+    : "";
+  els.tQuoteStatus.textContent = `${contract} ${sessionText} / ${futureText} / ${payload.status || "loading"}${eventText ? ` / ${eventText}` : ""}`;
+  renderTQuoteVixSummary();
+  if (!rows.length) {
+    els.tQuoteBody.innerHTML = `<tr><td colspan="23">尚無 Fugle T 型報價資料。</td></tr>`;
+    return;
+  }
+  const centerPrice = payload.future_price || tQuoteCenterPrice();
+  const atm = rows.reduce((best, row) => Math.abs(row.strike - centerPrice) < Math.abs(best.strike - centerPrice) ? row : best, rows[0]);
+  els.tQuoteBody.innerHTML = rows.map((row) => {
     const atmClass = atm && row.strike === atm.strike ? "atm-row" : "";
+    const call = row.call || null;
+    const put = row.put || null;
     return `
       <tr class="${atmClass}">
-        <td>${row.call ? formatNumber(row.call.volume, 0) : "-"}</td>
-        <td>${row.call ? formatQuote(row.call.ask) : "-"}</td>
-        <td>${row.call ? formatQuote(row.call.bid) : "-"}</td>
-        <td class="quote-call">
-          ${row.call ? `<button type="button" class="quote-price" data-action="add-chain" data-type="call" data-strike="${row.strike}" data-price="${optionMarkPrice(row.call)}" data-contract="${row.contract}" title="加入 Call 模擬部位">${formatQuote(optionMarkPrice(row.call))}</button>` : "-"}
-        </td>
+        ${renderFugleCallCells(call, row.strike, contract)}
         <td class="strike-cell">${formatNumber(row.strike, 0)}</td>
-        <td class="quote-put">
-          ${row.put ? `<button type="button" class="quote-price" data-action="add-chain" data-type="put" data-strike="${row.strike}" data-price="${optionMarkPrice(row.put)}" data-contract="${row.contract}" title="加入 Put 模擬部位">${formatQuote(optionMarkPrice(row.put))}</button>` : "-"}
-        </td>
-        <td>${row.put ? formatQuote(row.put.bid) : "-"}</td>
-        <td>${row.put ? formatQuote(row.put.ask) : "-"}</td>
-        <td>${row.put ? formatNumber(row.put.volume, 0) : "-"}</td>
+        ${renderFuglePutCells(put, row.strike, contract)}
       </tr>
     `;
   }).join("");
+}
+
+function renderFugleCallCells(leg, strike, contract) {
+  if (!leg) return `<td colspan="11">-</td>`;
+  return `
+    <td>${formatNullableNumber(leg.volume, 0)}</td>
+    <td class="quote-call">${renderFugleQuoteButton(leg, "call", strike, contract)}</td>
+    <td>${formatNullableNumber(leg.bid_size, 0)}</td>
+    <td class="quote-call">${formatTQuoteNumber(leg.bid)}</td>
+    <td class="quote-call">${formatTQuoteNumber(leg.ask)}</td>
+    <td>${formatNullableNumber(leg.ask_size, 0)}</td>
+    <td>${formatNullablePercent(leg.mid_iv)}</td>
+    <td>${formatNullableNumber(leg.delta, 4)}</td>
+    <td>${formatNullableNumber(leg.gamma, 6)}</td>
+    <td class="${pnlClass(leg.theta)}">${formatNullableNumber(leg.theta, 1)}</td>
+    <td>${formatNullableNumber(leg.vega, 1)}</td>
+  `;
+}
+
+function renderFuglePutCells(leg, strike, contract) {
+  if (!leg) return `<td colspan="11">-</td>`;
+  return `
+    <td>${formatNullableNumber(leg.vega, 1)}</td>
+    <td class="${pnlClass(leg.theta)}">${formatNullableNumber(leg.theta, 1)}</td>
+    <td>${formatNullableNumber(leg.gamma, 6)}</td>
+    <td>${formatNullableNumber(leg.delta, 4)}</td>
+    <td>${formatNullablePercent(leg.mid_iv)}</td>
+    <td>${formatNullableNumber(leg.bid_size, 0)}</td>
+    <td class="quote-put">${formatTQuoteNumber(leg.bid)}</td>
+    <td class="quote-put">${formatTQuoteNumber(leg.ask)}</td>
+    <td>${formatNullableNumber(leg.ask_size, 0)}</td>
+    <td class="quote-put">${renderFugleQuoteButton(leg, "put", strike, contract)}</td>
+    <td>${formatNullableNumber(leg.volume, 0)}</td>
+  `;
+}
+
+function renderFugleQuoteButton(leg, type, strike, contract) {
+  const price = fugleLegMarkPrice(leg);
+  const text = formatTQuoteNumber(leg.last);
+  if (!price || price <= 0) return text;
+  return `<button type="button" class="quote-price" data-action="add-chain" data-type="${type}" data-strike="${strike}" data-price="${price}" data-contract="${contract}" title="加入 ${type === "call" ? "Call" : "Put"} 模擬部位">${text}</button>`;
+}
+
+function fugleLegMarkPrice(leg) {
+  if (leg?.last > 0) return leg.last;
+  if (leg?.bid > 0 && leg?.ask > 0) return (leg.bid + leg.ask) / 2;
+  return leg?.bid || leg?.ask || 0;
+}
+
+function renderTQuoteVixSummary() {
+  const payload = state.fugleTQuote;
+  const vix = payload?.vix;
+  if (els.tVixValue) {
+    els.tVixValue.textContent = vix ? `${formatNumber(vix.value, 2)}%` : "--";
+  }
+  if (els.tVixMeta) {
+    els.tVixMeta.textContent = vix
+      ? `4C+4P ATM 加權 / 樣本 ${vix.call_count}C + ${vix.put_count}P / ${payload.last_aggregate_at || payload.last_book_at || ""}`
+      : "等待 Fugle live IV 樣本...";
+  }
+}
+
+function drawTQuoteVixChart() {
+  const canvas = els.tVixChart;
+  if (!canvas) return;
+  const series = state.fugleTQuote?.vix_series || [];
+  const rect = canvas.getBoundingClientRect();
+  const dpr = window.devicePixelRatio || 1;
+  canvas.width = Math.max(1, Math.floor(rect.width * dpr));
+  canvas.height = Math.max(1, Math.floor(rect.height * dpr));
+  const ctx = canvas.getContext("2d");
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  const width = rect.width;
+  const height = rect.height;
+  ctx.clearRect(0, 0, width, height);
+  ctx.fillStyle = "#ffffff";
+  ctx.fillRect(0, 0, width, height);
+  const values = series.map((point) => Number(point.value)).filter(Number.isFinite);
+  if (values.length < 2) {
+    ctx.fillStyle = "#94a3b8";
+    ctx.font = "13px Segoe UI, sans-serif";
+    ctx.fillText("等待 VIX 速算序列...", 16, height / 2);
+    return;
+  }
+  const pad = { left: 46, right: 18, top: 12, bottom: 24 };
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+  const span = Math.max(0.5, max - min);
+  const yMin = min - span * 0.18;
+  const yMax = max + span * 0.18;
+  const scaleX = (index) => pad.left + (index / Math.max(1, values.length - 1)) * (width - pad.left - pad.right);
+  const scaleY = (value) => pad.top + ((yMax - value) / (yMax - yMin)) * (height - pad.top - pad.bottom);
+  ctx.strokeStyle = "#e2e8f0";
+  ctx.lineWidth = 1;
+  for (let index = 0; index < 4; index += 1) {
+    const y = pad.top + (index / 3) * (height - pad.top - pad.bottom);
+    ctx.beginPath();
+    ctx.moveTo(pad.left, y);
+    ctx.lineTo(width - pad.right, y);
+    ctx.stroke();
+  }
+  ctx.strokeStyle = "#2563eb";
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  values.forEach((value, index) => {
+    const x = scaleX(index);
+    const y = scaleY(value);
+    if (index === 0) ctx.moveTo(x, y);
+    else ctx.lineTo(x, y);
+  });
+  ctx.stroke();
+  const last = values.at(-1);
+  ctx.fillStyle = "#2563eb";
+  ctx.beginPath();
+  ctx.arc(scaleX(values.length - 1), scaleY(last), 3.5, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = "#475569";
+  ctx.font = "12px Segoe UI, sans-serif";
+  ctx.fillText(`${yMax.toFixed(1)}%`, 6, pad.top + 4);
+  ctx.fillText(`${yMin.toFixed(1)}%`, 6, height - pad.bottom + 4);
+  ctx.textAlign = "right";
+  ctx.fillText(`${last.toFixed(2)}%`, width - pad.right, Math.max(pad.top + 12, scaleY(last) - 8));
+  ctx.textAlign = "left";
+}
+
+function scheduleTQuoteVixChartResize() {
+  if (state.tVixResizeFrame) cancelAnimationFrame(state.tVixResizeFrame);
+  state.tVixResizeFrame = requestAnimationFrame(() => {
+    state.tVixResizeFrame = null;
+    drawTQuoteVixChart();
+  });
+}
+
+function formatTQuoteNumber(value) {
+  return Number.isFinite(Number(value)) && Number(value) > 0 ? formatNumber(Number(value), 1) : "-";
+}
+
+function pnlClass(value) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return "";
+  if (parsed > 0) return "positive";
+  if (parsed < 0) return "negative";
+  return "";
 }
 
 function renderStrategyTable() {
@@ -1189,6 +1470,27 @@ function timeValueClass(date, settlementDate) {
   return "";
 }
 
+function timeValueStateForCurrentTradingDate() {
+  const lastCandleDate = state.indexCandles.at(-1)?.time;
+  const date = parseDate(lastCandleDate) || stripTime(new Date());
+  const dateText = toDateInput(date);
+  const nextSettlementText = settlementDates().find((item) => item >= dateText) || settlementDates().at(-1) || "";
+  const nextSettlement = parseDate(nextSettlementText);
+  const phase = nextSettlement ? timeValueClass(date, nextSettlement).replace("time-", "").toUpperCase() : "";
+  const labels = {
+    P1: "P1（買方天堂）",
+    P2: "P2（賣方天堂）",
+    P3: "P3（收割期）",
+  };
+  return {
+    date: dateText,
+    settlement: nextSettlementText,
+    days: nextSettlement ? calendarDaysBetween(date, nextSettlement) : null,
+    phase: phase || "N/A",
+    label: labels[phase] || "等待行事曆資料",
+  };
+}
+
 function settlementReminderDates(today) {
   const todayText = toDateInput(today);
   return settlementDates()
@@ -1206,19 +1508,72 @@ function renderRiskAndAdvice() {
   const totals = aggregateRisk(state.positions);
   const chainStats = optionChainStats();
   const trend = indexTrend();
-  els.riskSummary.innerHTML = [
-    ["淨 Delta", formatNumber(totals.delta, 2)],
-    ["Gamma", formatNumber(totals.gamma, 3)],
-    ["Theta / 日", formatMoney(totals.theta)],
-    ["Vega / 1% IV", formatMoney(totals.vega)],
-    ["ATM IV", chainStats.atmIv ? formatPercent(chainStats.atmIv) : "-"],
-    ["Put Skew", chainStats.skew ? formatPercent(chainStats.skew) : "-"],
-  ].map(([label, value]) => `
-    <div class="risk-chip">
-      <span>${label}</span>
-      <strong>${value}</strong>
-    </div>
-  `).join("");
+  const timeValue = timeValueStateForCurrentTradingDate();
+
+  els.regimeFramework.innerHTML = `
+    <section class="regime-category">
+      <div class="regime-category-title">
+        <span>View</span>
+        <strong>方向判斷 placeholder</strong>
+      </div>
+      <div class="view-stack">
+        <div class="view-row">
+          <div class="view-factor">
+            <span>H</span>
+            <strong>過熱K</strong>
+            <p>待補判斷邏輯</p>
+          </div>
+          <div class="view-factor">
+            <span>2</span>
+            <strong>2Q</strong>
+            <p>待補判斷邏輯</p>
+          </div>
+        </div>
+        <div class="view-row">
+          <div class="view-factor">
+            <span>P</span>
+            <strong>樞紐點</strong>
+            <p>待補判斷邏輯</p>
+          </div>
+          <div class="view-factor">
+            <span>K</span>
+            <strong>關鍵K</strong>
+            <p>待補判斷邏輯</p>
+          </div>
+        </div>
+        <div class="view-row">
+          <div class="view-factor">
+            <span>R</span>
+            <strong>修正比例</strong>
+            <p>待補判斷邏輯</p>
+          </div>
+          <div class="view-factor">
+            <span>D</span>
+            <strong>道式防線</strong>
+            <p>待補判斷邏輯</p>
+          </div>
+        </div>
+      </div>
+    </section>
+    <section class="regime-category">
+      <div class="regime-category-title">
+        <span>Volatility</span>
+        <strong>波動判斷 placeholder</strong>
+      </div>
+      <div class="volatility-grid">
+        <div><span>波動上升</span><strong>待補</strong></div>
+        <div><span>波動持平</span><strong>待補</strong></div>
+        <div><span>波動下降</span><strong>待補</strong></div>
+      </div>
+    </section>
+    <section class="regime-category">
+      <div class="regime-category-title">
+        <span>Time Value</span>
+        <strong>${timeValue.label}</strong>
+      </div>
+      <p>依最後交易日 ${timeValue.date} 對應 ${timeValue.settlement || "--"} 結算行事曆，剩餘 ${timeValue.days ?? "--"} 天。</p>
+    </section>
+  `;
 
   const bias = trend > 0.015 ? "偏多" : trend < -0.015 ? "偏空" : "震盪";
   const volTone = chainStats.atmIv && chainStats.atmIv > 0.28 ? "波動偏高" : "波動中性";
@@ -1299,7 +1654,7 @@ async function fetchIndexCandles(options = {}) {
       .map((date) => candlesByDate.get(date))
       .filter(Boolean);
     const droppedCount = tradingDates.length - mergedCandles.length;
-    const candles = mergedCandles.slice(-90);
+    const candles = mergedCandles.slice(-120);
 
     if (!candles.length) throw new Error("查無 TAIEX 資料，可能是假日、權限或請求額度限制。");
     state.indexCandles = candles;
@@ -1397,8 +1752,8 @@ async function fetchRealtimeQuotes(options = {}) {
   state.isFetchingQuotes = true;
   const shouldAnnounce = !options.refresh;
   if (shouldAnnounce) {
-    els.fetchOptionsBtn.disabled = true;
-    els.optionStatus.textContent = "正在讀取本機即時報價快取...";
+    if (els.fetchOptionsBtn) els.fetchOptionsBtn.disabled = true;
+    if (els.optionStatus) els.optionStatus.textContent = "正在讀取自動化部位即時報價資料...";
   }
   try {
     const payload = await localQuoteCache({ force: !options.auto && !options.refresh });
@@ -1421,18 +1776,20 @@ async function fetchRealtimeQuotes(options = {}) {
     state.optionChain = filtered;
     syncPositionMarketPrices();
     const latestTime = latestQuoteTime([futuresQuote, ...filtered]);
-    const cacheTime = payload.updated_at ? `，快取 ${formatCacheTime(payload.updated_at)}` : "";
+    const cacheTime = payload.updated_at ? `，更新 ${formatCacheTime(payload.updated_at)}` : "";
     const warningText = payload.error ? `；上次更新警告：${payload.error}` : "";
     const indexText = indexQuote ? `；加權指數 ${formatNumber(indexQuote.close, 0)}` : "";
-    els.optionStatus.textContent = `已讀取 ${filtered.length} 筆 TXO snapshot；近月台指期 ${futuresQuote.futures_id} ${formatNumber(futuresQuote.close, 0)}${indexText}${latestTime ? `，行情 ${latestTime}` : ""}${cacheTime}${warningText}。`;
+    if (els.optionStatus) {
+      els.optionStatus.textContent = `已讀取 ${filtered.length} 筆 TXO snapshot；近月台指期 ${futuresQuote.futures_id} ${formatNumber(futuresQuote.close, 0)}${indexText}${latestTime ? `，行情 ${latestTime}` : ""}${cacheTime}${warningText}。`;
+    }
     renderAll();
   } catch (error) {
     const fallbackText = options.auto ? "，目前保留示範選擇權鏈" : "";
     if (shouldAnnounce) {
-      els.optionStatus.textContent = `本機即時報價快取讀取失敗：${error.message}${fallbackText}`;
+      if (els.optionStatus) els.optionStatus.textContent = `自動化部位即時報價讀取失敗：${error.message}${fallbackText}`;
     }
   } finally {
-    if (shouldAnnounce) els.fetchOptionsBtn.disabled = false;
+    if (shouldAnnounce && els.fetchOptionsBtn) els.fetchOptionsBtn.disabled = false;
     state.isFetchingQuotes = false;
   }
 }
@@ -1450,17 +1807,17 @@ async function localQuoteCache(options = {}) {
     response = await fetch(url, { cache: "no-store" }).catch(() => null);
     if (response?.ok) break;
   }
-  if (!response?.ok) throw new Error(response ? `HTTP ${response.status}` : "快取服務未啟動");
+  if (!response?.ok) throw new Error(response ? `HTTP ${response.status}` : "即時報價服務未啟動");
   const payload = await response.json();
   if (!payload.ok && !(payload.futures || []).length && !(payload.options || []).length) {
-    throw new Error(payload.error || "快取尚未產生。");
+    throw new Error(payload.error || "即時報價尚未產生。");
   }
   return payload;
 }
 
 async function fetchOptionDaily() {
-  els.fetchOptionsBtn.disabled = true;
-  els.optionStatus.textContent = "正在向 FinMind 抓取 TaiwanOptionDaily...";
+  if (els.fetchOptionsBtn) els.fetchOptionsBtn.disabled = true;
+  if (els.optionStatus) els.optionStatus.textContent = "正在向 FinMind 抓取 TaiwanOptionDaily...";
   try {
     if (!els.optionDateInput) throw new Error("日資料查詢介面未啟用。");
     const params = { start_date: els.optionDateInput.value };
@@ -1474,12 +1831,12 @@ async function fetchOptionDaily() {
       .sort((a, b) => a.strike - b.strike);
     if (!filtered.length) throw new Error("查無 TXO 選擇權資料，請確認日期、契約月份或權限。");
     state.optionChain = filtered;
-    els.optionStatus.textContent = `已更新 ${filtered.length} 筆 TXO 選擇權日資料。`;
+    if (els.optionStatus) els.optionStatus.textContent = `已更新 ${filtered.length} 筆 TXO 選擇權日資料。`;
     renderAll();
   } catch (error) {
-    els.optionStatus.textContent = `FinMind 抓取失敗：${error.message}`;
+    if (els.optionStatus) els.optionStatus.textContent = `FinMind 抓取失敗：${error.message}`;
   } finally {
-    els.fetchOptionsBtn.disabled = false;
+    if (els.fetchOptionsBtn) els.fetchOptionsBtn.disabled = false;
   }
 }
 

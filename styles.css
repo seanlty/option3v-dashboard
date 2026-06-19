@@ -165,14 +165,9 @@ label span {
   min-height: 0;
 }
 
-.strategy-panel {
-  grid-column: 1 / -1;
-  grid-row: 4;
-}
-
 .t-quote-panel {
   grid-column: 1 / -1;
-  grid-row: 5;
+  grid-row: 4;
 }
 
 .positions-panel,
@@ -181,12 +176,12 @@ label span {
 }
 
 .positions-panel {
-  grid-row: 6;
+  grid-row: 5;
   width: 100%;
 }
 
 .payoff-panel {
-  grid-row: 7;
+  grid-row: 6;
   width: 100%;
 }
 
@@ -212,6 +207,39 @@ label span {
   color: #ffffff;
 }
 
+.panel-tabs {
+  align-items: center;
+  background: var(--surface-alt);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  display: inline-flex;
+  flex-shrink: 0;
+  gap: 2px;
+  padding: 3px;
+}
+
+.panel-tabs button {
+  background: transparent;
+  border: 0;
+  border-radius: 6px;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 800;
+  min-height: 32px;
+  padding: 6px 10px;
+  white-space: nowrap;
+}
+
+.panel-tabs button.active {
+  background: #ffffff;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.08);
+  color: var(--ink);
+}
+
+.tab-pane[hidden] {
+  display: none;
+}
+
 .position-form,
 .data-controls {
   display: grid;
@@ -221,7 +249,30 @@ label span {
 }
 
 .data-controls {
-  grid-template-columns: repeat(2, minmax(130px, 0.8fr)) auto;
+  align-items: end;
+  grid-template-columns: repeat(2, minmax(130px, 0.8fr)) auto minmax(180px, 1fr);
+}
+
+.market-panel .data-controls {
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.market-panel .data-controls input,
+.market-panel .data-controls button {
+  min-height: 32px;
+  padding-bottom: 5px;
+  padding-top: 5px;
+}
+
+.market-panel .data-controls label span {
+  margin-bottom: 3px;
+}
+
+.data-controls .provider-note {
+  align-self: center;
+  justify-self: end;
+  text-align: right;
 }
 
 .data-controls.slim {
@@ -252,6 +303,13 @@ label span {
 .automation-placeholders strong {
   display: block;
   font-size: 14px;
+}
+
+.automation-history-controls {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: minmax(180px, 260px) 1fr;
+  margin-bottom: 12px;
 }
 
 .automation-log-wrap {
@@ -442,10 +500,51 @@ table {
 
 .t-quote-wrap {
   max-height: 460px;
+  overflow: auto;
+}
+
+.t-vix-panel {
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  margin-bottom: 14px;
+  padding: 12px;
+}
+
+.t-vix-header {
+  align-items: baseline;
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+
+.t-vix-header span {
+  color: var(--muted);
+  display: block;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.t-vix-header strong {
+  color: var(--ink);
+  display: block;
+  font-size: 24px;
+}
+
+.t-vix-header small {
+  color: var(--muted);
+  text-align: right;
+}
+
+#tVixChart {
+  display: block;
+  height: 180px;
+  width: 100%;
 }
 
 .t-quote-table {
-  min-width: 920px;
+  min-width: 1760px;
   table-layout: fixed;
 }
 
@@ -477,8 +576,8 @@ table {
   color: #b42334;
 }
 
-.t-quote-table th:nth-child(5),
-.t-quote-table td:nth-child(5),
+.t-quote-table th:nth-child(12),
+.t-quote-table td:nth-child(12),
 .t-quote-table .strike-heading,
 .t-quote-table .strike-cell {
   background: #f8fafc;
@@ -996,30 +1095,133 @@ tbody tr:last-child td {
   white-space: nowrap;
 }
 
-.risk-summary {
+.regime-framework {
   display: grid;
-  gap: 10px;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   margin-bottom: 12px;
 }
 
-.risk-chip {
-  background: var(--surface-alt);
+.regime-category {
+  background: #ffffff;
   border: 1px solid var(--line);
   border-radius: 8px;
+  display: flex;
+  flex-direction: column;
   padding: 12px;
 }
 
-.risk-chip span {
+.regime-category-title {
+  align-items: baseline;
+  display: flex;
+  gap: 10px;
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+
+.regime-category-title span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.regime-category-title strong {
+  color: var(--ink);
+  font-size: 15px;
+}
+
+.regime-category p {
+  color: var(--muted);
+  line-height: 1.55;
+  margin: 0;
+}
+
+.volatility-grid {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: 1fr;
+}
+
+.volatility-grid div {
+  background: var(--surface-alt);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  min-width: 0;
+  padding: 10px;
+}
+
+.volatility-grid span {
   color: var(--muted);
   display: block;
   font-size: 12px;
+  font-weight: 800;
   margin-bottom: 5px;
 }
 
-.risk-chip strong {
+.volatility-grid strong {
+  color: var(--ink);
+  display: block;
+  font-size: 14px;
+}
+
+.view-stack {
+  display: grid;
+  gap: 10px;
+}
+
+.view-row {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.view-factor {
+  background: var(--surface-alt);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  min-width: 0;
+  padding: 10px;
+}
+
+.view-factor span {
+  color: var(--muted);
+  display: block;
+  font-size: 12px;
+  font-weight: 900;
+  margin-bottom: 5px;
+}
+
+.view-factor strong {
+  color: var(--ink);
+  display: block;
+  font-size: 14px;
+}
+
+.view-factor p {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+  margin-top: 5px;
+}
+
+.placeholder-panel {
+  align-items: center;
+  background: #f8fafc;
+  border: 1px dashed #cbd5e1;
+  border-radius: 8px;
+  color: var(--muted);
+  display: grid;
+  min-height: 360px;
+  place-content: center;
+  text-align: center;
+}
+
+.placeholder-panel strong {
+  color: var(--ink);
   display: block;
   font-size: 18px;
+  margin-bottom: 6px;
 }
 
 .advice-box {
@@ -1075,12 +1277,12 @@ tbody tr:last-child td {
 
   .positions-panel {
     grid-column: 1;
-    grid-row: 7;
+    grid-row: 6;
   }
 
   .payoff-panel {
     grid-column: 1;
-    grid-row: 8;
+    grid-row: 7;
   }
 
   .option-chain-panel {
@@ -1088,14 +1290,9 @@ tbody tr:last-child td {
     grid-row: 3;
   }
 
-  .strategy-panel {
-    grid-column: 1;
-    grid-row: 5;
-  }
-
   .t-quote-panel {
     grid-column: 1;
-    grid-row: 6;
+    grid-row: 5;
   }
 }
 
@@ -1117,9 +1314,11 @@ tbody tr:last-child td {
   .data-controls,
   .data-controls.slim,
   .automation-placeholders,
+  .automation-history-controls,
   .strategy-filters,
   .stat-grid,
-  .risk-summary {
+  .regime-framework,
+  .volatility-grid {
     grid-template-columns: 1fr;
   }
 
@@ -1129,6 +1328,11 @@ tbody tr:last-child td {
 
   .panel-header > :last-child {
     margin-top: 10px;
+  }
+
+  .data-controls .provider-note {
+    justify-self: start;
+    text-align: left;
   }
 
   .calendar-item {
