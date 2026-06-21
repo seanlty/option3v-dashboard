@@ -19,6 +19,21 @@ from urllib.parse import urlparse
 import requests
 import websockets
 
+try:
+    from .quote_snapshot_cache import (
+        QuoteSnapshotStore,
+        legacy_tquote_from_quote_snapshot,
+        quote_snapshot_from_tquote_payload,
+        snapshot_has_usable_quotes,
+    )
+except ImportError:  # pragma: no cover - supports `python src/fugle_live.py`.
+    from quote_snapshot_cache import (
+        QuoteSnapshotStore,
+        legacy_tquote_from_quote_snapshot,
+        quote_snapshot_from_tquote_payload,
+        snapshot_has_usable_quotes,
+    )
+
 
 ROOT = Path(__file__).resolve().parents[1]
 BASE_URL = "https://api.fugle.tw/marketdata/v1.0/futopt"
@@ -28,6 +43,7 @@ DEFAULT_PORT = 8787
 DEFAULT_RATE = 0.015
 VIX_SAMPLE_INTERVAL_SECONDS = 1.0
 VIX_SERIES_LIMIT = 3600
+REST_PROBE_INTERVAL_SECONDS = 30
 
 
 @dataclass
@@ -163,6 +179,9 @@ class FugleLiveTQuoteService:
         self.strike_count = strike_count
         self.after_hours = is_after_hours_now() if after_hours is None else after_hours
         self.state = DemoState(contract=self.contract, after_hours=self.after_hours)
+        self.snapshot_store = QuoteSnapshotStore()
+        self.rest_probe_lock = threading.Lock()
+        self.last_rest_probe_monotonic = 0.0
         self.thread: threading.Thread | None = None
         self.started = False
 
@@ -191,6 +210,59 @@ class FugleLiveTQuoteService:
             self.start()
         return self.state.snapshot()
 
+    def quote_snapshot(self) -> dict[str, Any]:
+        legacy = self.snapshot()
+        live_snapshot = quote_snapshot_from_tquote_payload(legacy, source_type="fugle_live")
+        if snapshot_has_usable_quotes(live_snapshot):
+            self.snapshot_store.write(live_snapshot)
+            return live_snapshot
+
+        rest_snapshot = self._rest_quote_snapshot_if_due(force=self.snapshot_store.read_latest() is None)
+        if rest_snapshot and snapshot_has_usable_quotes(rest_snapshot):
+            self.snapshot_store.write(rest_snapshot)
+            return rest_snapshot
+
+        cached = self.snapshot_store.read_latest(
+            force_stale=True,
+            error=legacy.get("error") or "Fugle live quote is not currently available.",
+        )
+        if cached:
+            return cached
+        return live_snapshot
+
+    def cached_legacy_snapshot(self) -> dict[str, Any]:
+        return legacy_tquote_from_quote_snapshot(self.quote_snapshot())
+
+    def _rest_quote_snapshot_if_due(self, force: bool = False) -> dict[str, Any] | None:
+        if not self.token:
+            return None
+        current = time.monotonic()
+        if not force and current - self.last_rest_probe_monotonic < REST_PROBE_INTERVAL_SECONDS:
+            return None
+        if not self.rest_probe_lock.acquire(blocking=False):
+            return None
+        try:
+            self.last_rest_probe_monotonic = current
+            return self._build_rest_quote_snapshot()
+        except Exception as error:  # noqa: BLE001 - cache fallback should handle no REST data.
+            self.state.update(error=str(error))
+            return None
+        finally:
+            self.rest_probe_lock.release()
+
+    def _build_rest_quote_snapshot(self) -> dict[str, Any]:
+        errors: list[str] = []
+        for after_hours in unique_bool_order(self.after_hours):
+            try:
+                payload = fugle_rest_tquote_payload(self.token, self.contract, self.strike_count, after_hours)
+                snapshot = quote_snapshot_from_tquote_payload(payload, source_type="fugle_rest_probe")
+                if snapshot_has_usable_quotes(snapshot):
+                    return snapshot
+                errors.append(f"{'afterhours' if after_hours else 'regular'}: no usable REST quotes")
+            except Exception as error:  # noqa: BLE001 - try the other session.
+                errors.append(f"{'afterhours' if after_hours else 'regular'}: {error}")
+        raise RuntimeError("; ".join(errors))
+
 
 def now_text() -> str:
     return datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
@@ -218,6 +290,10 @@ def front_month_contract() -> str:
 def is_after_hours_now() -> bool:
     now = datetime.now().time()
     return now >= datetime_time(hour=14, minute=45) or now < datetime_time(hour=6, minute=0)
+
+
+def unique_bool_order(first: bool) -> list[bool]:
+    return [first, not first]
 
 
 def load_env_token() -> str:
@@ -472,7 +548,7 @@ def black76_greeks(
 def mid_price(bid: float | None, ask: float | None) -> float | None:
     if bid and ask and bid > 0 and ask > 0:
         return (bid + ask) / 2
-    return bid or ask
+    return None
 
 
 def option_metrics(
@@ -598,6 +674,162 @@ def t_quote_rows(
             "time": book.get("time"),
         }
     return [by_strike[strike] for strike in strikes]
+
+
+def nested_get(payload: dict[str, Any], *path: str) -> Any:
+    current: Any = payload
+    for key in path:
+        if not isinstance(current, dict):
+            return None
+        current = current.get(key)
+    return current
+
+
+def rest_quote_symbol(token: str, symbol: str, after_hours: bool) -> dict[str, Any]:
+    if not after_hours:
+        return fugle_get(f"/intraday/quote/{symbol}", token)
+    try:
+        return fugle_get(f"/intraday/quote/{symbol}", token, session="afterhours")
+    except Exception:  # noqa: BLE001 - not every symbol has after-hours REST data.
+        return fugle_get(f"/intraday/quote/{symbol}", token)
+
+
+def fugle_rest_tquote_payload(token: str, contract: str, strike_count: int, after_hours: bool) -> dict[str, Any]:
+    universe = prepare_universe(token, contract, strike_count, after_hours)
+    snapshot_at = now_text()
+    years = years_to_expiry(universe["settlement_date"])
+    rows = rest_t_quote_rows(
+        token,
+        universe["selected_strikes"],
+        universe["symbol_meta"],
+        universe["future_price"],
+        DEFAULT_RATE,
+        years,
+        after_hours,
+    )
+    vix = quick_vix_from_rows(rows, universe["future_price"])
+    return {
+        "status": "ok",
+        "authenticated": False,
+        "subscribed": False,
+        "after_hours": after_hours,
+        "contract": contract,
+        "settlement_date": universe["settlement_date"],
+        "future_symbol": universe["future_symbol"],
+        "future_price": universe["future_price"],
+        "risk_free_rate": DEFAULT_RATE,
+        "time_to_expiry_years": years,
+        "selected_symbols": universe["selected_symbols"],
+        "selected_strikes": universe["selected_strikes"],
+        "event_counts": {"rest_probe": len(universe["selected_symbols"])},
+        "last_event_at": snapshot_at,
+        "last_book_at": "",
+        "last_aggregate_at": snapshot_at,
+        "vix": vix,
+        "vix_series": [{
+            "time": snapshot_at,
+            "value": vix["value"],
+            "sample_count": vix["sample_count"],
+            "call_count": vix["call_count"],
+            "put_count": vix["put_count"],
+        }] if vix else [],
+        "error": "",
+        "rows": rows,
+    }
+
+
+def rest_t_quote_rows(
+    token: str,
+    strikes: list[int],
+    symbol_meta: dict[str, dict[str, Any]],
+    future_price: float | None,
+    rate: float,
+    years: float,
+    after_hours: bool,
+) -> list[dict[str, Any]]:
+    by_strike: dict[int, dict[str, Any]] = {strike: {"strike": strike} for strike in strikes}
+    for symbol, meta in sorted(symbol_meta.items(), key=lambda item: (item[1]["strike"], item[1]["side"])):
+        side = meta["side"]
+        strike = meta["strike"]
+        try:
+            quote = rest_quote_symbol(token, symbol, after_hours)
+            by_strike[strike][side] = rest_quote_leg(symbol, side, strike, quote, future_price, rate, years)
+        except Exception as error:  # noqa: BLE001 - keep the rest of the chain usable.
+            by_strike[strike][side] = {
+                "symbol": symbol,
+                "bid": None,
+                "bid_size": None,
+                "ask": None,
+                "ask_size": None,
+                "last": None,
+                "volume": None,
+                "change": None,
+                "change_percent": None,
+                "last_updated": None,
+                "bid_iv": None,
+                "ask_iv": None,
+                "mid_iv": None,
+                "delta": None,
+                "gamma": None,
+                "theta": None,
+                "vega": None,
+                "time": None,
+                "error": str(error),
+            }
+    return [by_strike[strike] for strike in strikes]
+
+
+def rest_quote_leg(
+    symbol: str,
+    side: str,
+    strike: int,
+    quote: dict[str, Any],
+    future_price: float | None,
+    rate: float,
+    years: float,
+) -> dict[str, Any]:
+    last_trade = quote.get("lastTrade") or {}
+    total = quote.get("total") or {}
+    bid = first_number(
+        last_trade.get("bid"),
+        quote.get("bidPrice"),
+        quote.get("bestBidPrice"),
+        quote.get("bid"),
+    )
+    ask = first_number(
+        last_trade.get("ask"),
+        quote.get("askPrice"),
+        quote.get("bestAskPrice"),
+        quote.get("ask"),
+    )
+    last = first_number(
+        quote.get("lastPrice"),
+        quote.get("closePrice"),
+        last_trade.get("price"),
+        last_trade.get("lastPrice"),
+    )
+    volume = first_number(total.get("tradeVolume"), total.get("volume"), quote.get("tradeVolume"), quote.get("volume"))
+    metrics = option_metrics(future_price, strike, years, rate, side, bid, ask)
+    return {
+        "symbol": quote.get("symbol") or symbol,
+        "bid": bid,
+        "bid_size": first_number(last_trade.get("bidSize"), quote.get("bidSize"), quote.get("bestBidSize")),
+        "ask": ask,
+        "ask_size": first_number(last_trade.get("askSize"), quote.get("askSize"), quote.get("bestAskSize")),
+        "last": last,
+        "volume": volume,
+        "change": first_number(quote.get("change"), nested_get(quote, "lastTrade", "change")),
+        "change_percent": first_number(quote.get("changePercent"), nested_get(quote, "lastTrade", "changePercent")),
+        "last_updated": first_number(quote.get("lastUpdated")),
+        "bid_iv": metrics["bid_iv"],
+        "ask_iv": metrics["ask_iv"],
+        "mid_iv": metrics["mid_iv"],
+        "delta": metrics["delta"],
+        "gamma": metrics["gamma"],
+        "theta": metrics["theta"],
+        "vega": metrics["vega"],
+        "time": last_trade.get("time") or quote.get("lastUpdated"),
+    }
 
 
 async def fugle_books_loop(token: str, state: DemoState) -> None:

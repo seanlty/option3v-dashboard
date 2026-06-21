@@ -1111,7 +1111,7 @@ function connectFugleTQuote() {
   if (state.fugleTQuoteEventSource) {
     state.fugleTQuoteEventSource.close();
   }
-  const source = new EventSource("/api/fugle-tquote-events");
+  const source = new EventSource("/api/live/tquote-events");
   state.fugleTQuoteEventSource = source;
   source.onmessage = (event) => {
     try {
@@ -1127,7 +1127,7 @@ function connectFugleTQuote() {
 
 async function fetchFugleTQuoteSnapshot() {
   try {
-    const response = await fetch("/api/fugle-tquote", { cache: "no-store" });
+    const response = await fetch("/api/live/tquote", { cache: "no-store" });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     applyFugleTQuotePayload(await response.json());
   } catch (error) {
@@ -1136,9 +1136,72 @@ async function fetchFugleTQuoteSnapshot() {
 }
 
 function applyFugleTQuotePayload(payload) {
-  state.fugleTQuote = payload;
+  state.fugleTQuote = normalizeTQuotePayload(payload);
   renderTQuoteTable();
   drawTQuoteVixChart();
+}
+
+function normalizeTQuotePayload(payload) {
+  if (!payload) return null;
+  if (payload.schema === "quote_snapshot") return payload;
+  if (payload.quote_snapshot?.schema === "quote_snapshot") return payload.quote_snapshot;
+  return {
+    schema: "legacy_tquote",
+    contract_month: payload.contract,
+    settlement_date: payload.settlement_date,
+    session: payload.after_hours ? "night" : "day",
+    snapshot_at: payload.last_aggregate_at || payload.last_book_at || payload.last_event_at || "",
+    status: payload.status,
+    stale: Boolean(payload.stale),
+    error: payload.error || "",
+    source: {
+      type: payload.source?.type || "fugle_legacy",
+      event_counts: payload.event_counts || {},
+      last_book_at: payload.last_book_at,
+      last_aggregate_at: payload.last_aggregate_at,
+    },
+    underlying: {
+      symbol: payload.future_symbol,
+      price: payload.future_price,
+    },
+    rows: payload.rows || [],
+    vix: payload.vix ? {
+      value_percent: firstNumber(payload.vix.value_percent, payload.vix.value),
+      sample_count: payload.vix.sample_count,
+      call_count: payload.vix.call_count,
+      put_count: payload.vix.put_count,
+      method: payload.vix.method,
+    } : null,
+    vix_series: (payload.vix_series || []).map((point) => ({
+      ...point,
+      value_percent: firstNumber(point.value_percent, point.value),
+    })),
+  };
+}
+
+function tQuoteSourceText(payload) {
+  const sourceType = payload.source?.type || "";
+  const status = payload.status || "loading";
+  if (payload.stale || sourceType === "fugle_cache") {
+    const age = formatAgeSeconds(payload.source?.cache_age_seconds);
+    return `最後有效截面${age ? ` ${age}` : ""}`;
+  }
+  if (sourceType === "fugle_rest_probe") return `Fugle REST ${status}`;
+  if (sourceType === "fugle_live") return `Fugle live ${status}`;
+  return status;
+}
+
+function formatAgeSeconds(seconds) {
+  const value = Number(seconds);
+  if (!Number.isFinite(value) || value < 0) return "";
+  if (value < 90) return `${Math.round(value)}秒前`;
+  const minutes = value / 60;
+  if (minutes < 90) return `${Math.round(minutes)}分鐘前`;
+  return `${Math.round(minutes / 60)}小時前`;
+}
+
+function tQuoteVixPercent(vix) {
+  return firstNumber(vix?.value_percent, vix?.value);
 }
 
 function renderTQuoteTable() {
@@ -1153,21 +1216,25 @@ function renderTQuoteTable() {
     els.tQuoteStatus.textContent = `Fugle live：${payload.status || "error"} / ${payload.error}`;
   }
   const rows = payload.rows || [];
-  const contract = payload.contract || "TXO";
-  const futureText = payload.future_symbol && payload.future_price
-    ? `${payload.future_symbol} ${formatNumber(payload.future_price, 0)}`
+  const contract = payload.contract_month || payload.contract || "TXO";
+  const futureSymbol = payload.underlying?.symbol || payload.future_symbol;
+  const futurePrice = firstNumber(payload.underlying?.price, payload.future_price);
+  const futureText = futureSymbol && futurePrice
+    ? `${futureSymbol} ${formatNumber(futurePrice, 0)}`
     : "中心期貨讀取中";
-  const sessionText = payload.after_hours ? "夜盤" : "日盤";
-  const eventText = payload.event_counts
-    ? Object.entries(payload.event_counts).map(([key, value]) => `${key}:${value}`).join(" ")
+  const sessionText = payload.session === "night" || payload.after_hours ? "夜盤" : "日盤";
+  const eventCounts = payload.source?.event_counts || payload.event_counts;
+  const eventText = eventCounts
+    ? Object.entries(eventCounts).map(([key, value]) => `${key}:${value}`).join(" ")
     : "";
-  els.tQuoteStatus.textContent = `${contract} ${sessionText} / ${futureText} / ${payload.status || "loading"}${eventText ? ` / ${eventText}` : ""}`;
+  const sourceText = tQuoteSourceText(payload);
+  els.tQuoteStatus.textContent = `${contract} ${sessionText} / ${futureText} / ${sourceText}${eventText ? ` / ${eventText}` : ""}`;
   renderTQuoteVixSummary();
   if (!rows.length) {
     els.tQuoteBody.innerHTML = `<tr><td colspan="23">尚無 Fugle T 型報價資料。</td></tr>`;
     return;
   }
-  const centerPrice = payload.future_price || tQuoteCenterPrice();
+  const centerPrice = futurePrice || tQuoteCenterPrice();
   const atm = rows.reduce((best, row) => Math.abs(row.strike - centerPrice) < Math.abs(best.strike - centerPrice) ? row : best, rows[0]);
   els.tQuoteBody.innerHTML = rows.map((row) => {
     const atmClass = atm && row.strike === atm.strike ? "atm-row" : "";
@@ -1219,26 +1286,28 @@ function renderFuglePutCells(leg, strike, contract) {
 
 function renderFugleQuoteButton(leg, type, strike, contract) {
   const price = fugleLegMarkPrice(leg);
-  const text = formatTQuoteNumber(leg.last);
+  const text = formatTQuoteNumber(firstNumber(leg?.last, leg?.mid, price));
   if (!price || price <= 0) return text;
   return `<button type="button" class="quote-price" data-action="add-chain" data-type="${type}" data-strike="${strike}" data-price="${price}" data-contract="${contract}" title="加入 ${type === "call" ? "Call" : "Put"} 模擬部位">${text}</button>`;
 }
 
 function fugleLegMarkPrice(leg) {
-  if (leg?.last > 0) return leg.last;
+  if (leg?.mid > 0) return leg.mid;
   if (leg?.bid > 0 && leg?.ask > 0) return (leg.bid + leg.ask) / 2;
+  if (leg?.last > 0) return leg.last;
   return leg?.bid || leg?.ask || 0;
 }
 
 function renderTQuoteVixSummary() {
   const payload = state.fugleTQuote;
   const vix = payload?.vix;
+  const valuePercent = tQuoteVixPercent(vix);
   if (els.tVixValue) {
-    els.tVixValue.textContent = vix ? `${formatNumber(vix.value, 2)}%` : "--";
+    els.tVixValue.textContent = valuePercent ? `${formatNumber(valuePercent, 2)}%` : "--";
   }
   if (els.tVixMeta) {
     els.tVixMeta.textContent = vix
-      ? `4C+4P ATM 加權 / 樣本 ${vix.call_count}C + ${vix.put_count}P / ${payload.last_aggregate_at || payload.last_book_at || ""}`
+      ? `4C+4P ATM 加權 / 樣本 ${vix.call_count}C + ${vix.put_count}P / ${payload.snapshot_at || ""}${payload.stale ? " / 最後有效截面" : ""}`
       : "等待 Fugle live IV 樣本...";
   }
 }
@@ -1258,7 +1327,7 @@ function drawTQuoteVixChart() {
   ctx.clearRect(0, 0, width, height);
   ctx.fillStyle = "#ffffff";
   ctx.fillRect(0, 0, width, height);
-  const values = series.map((point) => Number(point.value)).filter(Number.isFinite);
+  const values = series.map((point) => Number(firstNumber(point.value_percent, point.value))).filter(Number.isFinite);
   if (values.length < 2) {
     ctx.fillStyle = "#94a3b8";
     ctx.font = "13px Segoe UI, sans-serif";
@@ -2133,6 +2202,21 @@ function positionMetrics(position) {
   const t = dte(position.expiry);
   const marketQuote = positionMarketQuote(position);
   const market = marketQuote.price;
+  const quoteLeg = marketQuote.leg || tQuoteOptionLeg(position);
+  const quoteGreeksReady = quoteLeg && ["delta", "gamma", "theta", "vega"].every((key) => Number.isFinite(Number(quoteLeg[key])));
+  if (quoteGreeksReady) {
+    const multiplier = sign * position.qty * POINT_VALUE;
+    return {
+      market,
+      marketSource: marketQuote.source,
+      pnl: (market - position.premium) * multiplier,
+      delta: Number(quoteLeg.delta) * multiplier,
+      gamma: Number(quoteLeg.gamma) * multiplier,
+      theta: Number(quoteLeg.theta) * multiplier,
+      vega: Number(quoteLeg.vega) * multiplier,
+      iv: firstNumber(quoteLeg.mid_iv, quoteLeg.iv),
+    };
+  }
   const iv = impliedVolatility(state.spot, position.strike, t, state.rate, market || position.premium, position.type) || 0.22;
   const greeks = blackScholesGreeks(state.spot, position.strike, t, state.rate, iv, position.type);
   const multiplier = sign * position.qty * POINT_VALUE;
@@ -2182,6 +2266,9 @@ function positionMarketQuote(position) {
 }
 
 function snapshotOptionMarketQuote(position) {
+  const fugleQuote = snapshotOptionMarketQuoteFromTQuote(position);
+  if (fugleQuote.price > 0) return fugleQuote;
+
   const contract = positionContract(position) || currentMonthContract();
   const sameSeries = state.optionChain
     .filter((row) => row.type === position.type)
@@ -2196,6 +2283,38 @@ function snapshotOptionMarketQuote(position) {
     source: exact ? "snapshot" : "snapshot-fallback",
     contract: quote.contract,
   };
+}
+
+function snapshotOptionMarketQuoteFromTQuote(position) {
+  const contract = positionContract(position);
+  const snapshot = state.fugleTQuote;
+  const snapshotContract = snapshot?.contract_month || snapshot?.contract;
+  if (!snapshot || (contract && snapshotContract && contract !== snapshotContract)) {
+    return { price: 0, source: "missing", contract };
+  }
+  const leg = tQuoteOptionLeg(position);
+  const price = fugleLegMarkPrice(leg);
+  if (price <= 0) return { price: 0, source: "missing", contract: snapshotContract || contract };
+  const usesMid = firstNumber(leg?.mid) > 0 || (firstNumber(leg?.bid) > 0 && firstNumber(leg?.ask) > 0);
+  const source = snapshot.stale
+    ? (usesMid ? "fugle-cache-mid" : "fugle-cache-last")
+    : (usesMid ? "fugle-live-mid" : "fugle-live-last");
+  return {
+    price,
+    source,
+    contract: snapshotContract || contract,
+    leg,
+  };
+}
+
+function tQuoteOptionLeg(position) {
+  const snapshot = state.fugleTQuote;
+  if (!snapshot?.rows?.length || isFuturePosition(position)) return null;
+  const strike = number(position.strike, NaN);
+  if (!Number.isFinite(strike)) return null;
+  const row = snapshot.rows.find((item) => Math.abs(number(item.strike, NaN) - strike) < 0.001);
+  if (!row) return null;
+  return row[position.type] || null;
 }
 
 function snapshotFutureMarketQuote(position) {
@@ -2262,6 +2381,10 @@ function expiryToContract(expiry) {
 }
 
 function marketSourceLabel(source) {
+  if (source === "fugle-live-mid") return "Fugle live bid/ask mid";
+  if (source === "fugle-live-last") return "Fugle live last；bid/ask mid 不可用";
+  if (source === "fugle-cache-mid") return "Fugle 最後有效截面 bid/ask mid";
+  if (source === "fugle-cache-last") return "Fugle 最後有效截面 last；bid/ask mid 不可用";
   if (source === "snapshot") return "FinMind 即時 snapshot";
   if (source === "snapshot-fallback") return "FinMind snapshot：未找到相同到期月，改用近月報價";
   if (source === "txf-proxy") return "FinMind 未回傳小台 snapshot，暫用同月份大台 TXF 即時價估算";

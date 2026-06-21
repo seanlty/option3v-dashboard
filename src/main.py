@@ -251,10 +251,16 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             self._send_json(payload)
             return
         if parsed.path == "/api/fugle-tquote":
-            self._send_json(FUGLE_TQUOTE.snapshot())
+            self._send_json(FUGLE_TQUOTE.cached_legacy_snapshot())
             return
         if parsed.path == "/api/fugle-tquote-events":
             self._send_event_stream()
+            return
+        if parsed.path == "/api/live/tquote":
+            self._send_json(FUGLE_TQUOTE.quote_snapshot())
+            return
+        if parsed.path == "/api/live/tquote-events":
+            self._send_quote_snapshot_event_stream()
             return
         if parsed.path == "/api/index-candles":
             query = parse_qs(parsed.query)
@@ -293,6 +299,22 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         while True:
             try:
                 payload = json.dumps(FUGLE_TQUOTE.snapshot(), ensure_ascii=False)
+                self.wfile.write(f"data: {payload}\n\n".encode("utf-8"))
+                self.wfile.flush()
+                time.sleep(1)
+            except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+                break
+
+    def _send_quote_snapshot_event_stream(self) -> None:
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Connection", "keep-alive")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.end_headers()
+        while True:
+            try:
+                payload = json.dumps(FUGLE_TQUOTE.quote_snapshot(), ensure_ascii=False)
                 self.wfile.write(f"data: {payload}\n\n".encode("utf-8"))
                 self.wfile.flush()
                 time.sleep(1)
