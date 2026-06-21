@@ -242,6 +242,12 @@ class DashboardHandler(SimpleHTTPRequestHandler):
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, directory=str(ROOT), **kwargs)
 
+    def end_headers(self) -> None:
+        static_path = urlparse(self.path).path
+        if static_path.endswith((".html", ".js", ".css")) or static_path == "/":
+            self.send_header("Cache-Control", "no-store")
+        super().end_headers()
+
     def do_GET(self) -> None:  # noqa: N802 - stdlib handler API.
         parsed = urlparse(self.path)
         if parsed.path == "/api/latest-quotes":

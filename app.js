@@ -4,6 +4,8 @@ const FINMIND_URL = "https://api.finmindtrade.com/api/v4/data";
 const T_QUOTE_STRIKE_RANGE = 5000;
 const SAMPLE_MONTHLY_STRIKE_STEP = 100;
 const QUOTE_POLL_MS = 5000;
+const INDEX_TRAILING_WHITESPACE_DAYS = 4;
+const INDEX_BAR_SPACING = 8;
 const FUTURE_SPECS = {
   TXF: { label: "大台 TXF", multiplier: 200, aliases: ["TXF"] },
   MXF: { label: "小台 MXF", multiplier: 50, aliases: ["MXF", "MTX"] },
@@ -45,11 +47,17 @@ const state = {
   candleSeries: null,
   scoreSeries: null,
   scoreDeltaSeries: null,
+  indexChartTimeKey: "",
+  indexChartValueKey: "",
   indexVisibleRangeKey: "",
   chartsSynced: false,
   crosshairsSynced: false,
   isSyncingChartRange: false,
   isSyncingCrosshair: false,
+  isRestoringIndexRange: false,
+  protectedIndexRange: null,
+  indexRangeRestoreToken: 0,
+  lastIndexVisibleLogicalRange: null,
   candleByTime: new Map(),
   scoreByTime: new Map(),
   scoreDeltaByTime: new Map(),
@@ -58,6 +66,7 @@ const state = {
   isFetchingQuotes: false,
   chartResizeFrame: null,
   chartResizeObserver: null,
+  indexChartSizeKey: "",
   strategyFilters: {
     view: "all",
     volatility: "all",
@@ -73,8 +82,8 @@ document.addEventListener("DOMContentLoaded", () => {
   loadPositions();
   seedMarketData();
   bindEvents();
-  renderAll();
-  loadSettlementDates().then(renderAll);
+  renderAll({ indexChart: true });
+  loadSettlementDates().then(() => renderAll({ indexChart: true }));
   fetchIndexCandles({ auto: true });
   fetchRealtimeQuotes({ auto: true });
   connectFugleTQuote();
@@ -219,7 +228,7 @@ function switchAutomationTab(tab) {
 function setDefaultDates() {
   const today = new Date();
   const end = toDateInput(today);
-  const start = defaultIndexStartDate(today);
+  const start = autoIndexStartDateForChart(defaultIndexStartDate(today), end);
   const nextExpiry = thirdWednesday(today.getFullYear(), today.getMonth());
   const expiry = nextExpiry < stripTime(today)
     ? thirdWednesday(today.getFullYear(), today.getMonth() + 1)
@@ -241,6 +250,66 @@ function lastSettlementDateOfYear(year) {
     .filter((date) => date.startsWith(prefix))
     .sort()
     .at(-1);
+}
+
+function autoIndexStartDateForChart(startDate, endDate) {
+  if (!startDate || !endDate) return startDate;
+  const selectedTradingDays = tradingDayCountBetween(startDate, endDate);
+  const requiredTradingDays = requiredIndexTradingDays();
+  if (selectedTradingDays + INDEX_TRAILING_WHITESPACE_DAYS >= requiredTradingDays) {
+    return startDate;
+  }
+  const end = parseDate(endDate);
+  if (!end) return startDate;
+  const targetStart = toDateInput(subtractTradingDays(end, requiredTradingDays - INDEX_TRAILING_WHITESPACE_DAYS - 1));
+  return nearestSettlementStartDate(targetStart, endDate, requiredTradingDays) || startDate;
+}
+
+function requiredIndexTradingDays() {
+  const chartWidth = indexChartWidthForDateRange();
+  return Math.max(120, Math.ceil(chartWidth / INDEX_BAR_SPACING));
+}
+
+function indexChartWidthForDateRange() {
+  const width = els.priceChart?.clientWidth || els.indexChart?.clientWidth || 0;
+  if (width > 0) return width;
+  const rect = els.priceChart?.getBoundingClientRect?.();
+  return Math.max(960, Math.floor(rect?.width || 0));
+}
+
+function nearestSettlementStartDate(targetStart, endDate, requiredTradingDays) {
+  const candidates = settlementDates()
+    .filter((date) => date <= endDate)
+    .sort((a, b) => Math.abs(dateDistanceDays(a, targetStart)) - Math.abs(dateDistanceDays(b, targetStart)) || String(a).localeCompare(String(b)));
+  const enough = candidates.find((date) => tradingDayCountBetween(date, endDate) + INDEX_TRAILING_WHITESPACE_DAYS >= requiredTradingDays);
+  return enough || candidates[0] || "";
+}
+
+function tradingDayCountBetween(startDate, endDate) {
+  return weekdayDatesBetween(startDate, endDate)
+    .filter((date) => !KNOWN_TWSE_CLOSED_DATES.has(date))
+    .length;
+}
+
+function subtractTradingDays(date, count) {
+  const cursor = stripTime(date);
+  let remaining = Math.max(0, count);
+  while (remaining > 0) {
+    cursor.setDate(cursor.getDate() - 1);
+    const text = toDateInput(cursor);
+    const day = cursor.getDay();
+    if (day !== 0 && day !== 6 && !KNOWN_TWSE_CLOSED_DATES.has(text)) {
+      remaining -= 1;
+    }
+  }
+  return cursor;
+}
+
+function dateDistanceDays(a, b) {
+  const dateA = parseDate(a);
+  const dateB = parseDate(b);
+  if (!dateA || !dateB) return Number.MAX_SAFE_INTEGER;
+  return Math.abs(calendarDaysBetween(dateA, dateB));
 }
 
 async function loadSettlementDates() {
@@ -323,13 +392,13 @@ function seedMarketData() {
   state.optionChain = sampleOptionChain();
 }
 
-function renderAll() {
+function renderAll(options = {}) {
   if (els.spotInput) els.spotInput.value = Math.round(state.spot);
   els.spotReadout.textContent = formatNumber(state.spot, 0);
   if (els.payoffSpotReadout) els.payoffSpotReadout.textContent = formatNumber(state.spot, 0);
   renderPositions();
   drawPayoff();
-  renderIndexChart();
+  if (options.indexChart) renderIndexChart();
   renderOptionChain();
   populateAutomationHistoryContracts();
   renderAutomationHistoryTable();
@@ -739,27 +808,58 @@ function renderIndexChart() {
   state.candleByTime = new Map(state.indexCandles.map((candle) => [candle.time, candle]));
   state.scoreByTime = new Map(opScores.map((score) => [score.time, score]));
   state.scoreDeltaByTime = new Map(opScoreDeltas.map((score) => [score.time, score]));
-  state.candleSeries.setData(candlesWithSettlementWhitespace(state.indexCandles));
-  state.scoreSeries.setData(scoresWithSettlementWhitespace(opScores, state.indexCandles));
-  state.scoreDeltaSeries.setData(scoresWithSettlementWhitespace(opScoreDeltas, state.indexCandles));
-  resizeIndexChart();
+  const chartTimes = indexChartTimes(state.indexCandles);
+  const chartTimeKey = indexChartTimeKey(chartTimes);
+  const chartValueKey = indexChartValueKey(state.indexCandles, opScores, opScoreDeltas);
+  const chartTimeChanged = state.indexChartTimeKey !== chartTimeKey;
+  const chartValueChanged = state.indexChartValueKey !== chartValueKey;
+  const preserveRange = !chartTimeChanged && chartValueChanged
+    ? currentIndexVisibleLogicalRange()
+    : null;
+  if (chartTimeChanged || chartValueChanged) {
+    state.indexChartTimeKey = chartTimeKey;
+    state.indexChartValueKey = chartValueKey;
+    state.candleSeries.setData(candlesWithSettlementWhitespace(state.indexCandles, chartTimes));
+    state.scoreSeries.setData(scoresWithSettlementWhitespace(opScores, chartTimes));
+    state.scoreDeltaSeries.setData(scoresWithSettlementWhitespace(opScoreDeltas, chartTimes));
+  }
+  resizeIndexChart({ preserveRange: !chartTimeChanged });
   syncIndexChartRanges();
   syncIndexCrosshairs();
-  applySettlementTimeScalePadding();
-  fitIndexChartToDataIfNeeded();
+  if (chartTimeChanged) {
+    applySettlementTimeScalePadding();
+    initializeIndexChartVisibleRange(chartTimes, chartTimeKey);
+  } else if (preserveRange) {
+    restoreIndexVisibleLogicalRange(preserveRange);
+  }
   requestAnimationFrame(() => requestAnimationFrame(renderEventLane));
 }
 
-function resizeIndexChart() {
+function resizeIndexChart(options = {}) {
   if (!state.indexChart || !state.scoreChart || !state.scoreDeltaChart) return;
   const priceSize = chartElementSize(els.priceChart);
   const scoreSize = chartElementSize(els.scoreChart);
   const deltaSize = chartElementSize(els.scoreDeltaChart);
   if (!priceSize.width || !scoreSize.width || !deltaSize.width) return;
+  const sizeKey = [
+    priceSize.width, priceSize.height,
+    scoreSize.width, scoreSize.height,
+    deltaSize.width, deltaSize.height,
+  ].join(":");
+  if (state.indexChartSizeKey === sizeKey) {
+    renderEventLane();
+    return;
+  }
+  const preserveRange = options.preserveRange === false ? null : currentIndexVisibleLogicalRange();
+  state.indexChartSizeKey = sizeKey;
   state.indexChart.applyOptions(priceSize);
   state.scoreChart.applyOptions(scoreSize);
   state.scoreDeltaChart.applyOptions(deltaSize);
-  renderEventLane();
+  if (preserveRange) {
+    restoreIndexVisibleLogicalRange(preserveRange);
+  } else {
+    renderEventLane();
+  }
 }
 
 function scheduleIndexChartResize() {
@@ -770,12 +870,31 @@ function scheduleIndexChartResize() {
   });
 }
 
+function indexChartObservedElements() {
+  return [els.priceChart, els.scoreChart, els.scoreDeltaChart].filter(Boolean);
+}
+
+function suspendIndexChartResizeObserver() {
+  if (state.chartResizeFrame) {
+    cancelAnimationFrame(state.chartResizeFrame);
+    state.chartResizeFrame = null;
+  }
+  if (!state.chartResizeObserver) return false;
+  state.chartResizeObserver.disconnect();
+  return true;
+}
+
+function resumeIndexChartResizeObserver(wasActive) {
+  if (!wasActive || !state.chartResizeObserver) return;
+  requestAnimationFrame(() => {
+    indexChartObservedElements().forEach((element) => state.chartResizeObserver.observe(element));
+  });
+}
+
 function observeIndexChartSize() {
   if (!window.ResizeObserver || state.chartResizeObserver) return;
   state.chartResizeObserver = new ResizeObserver(() => scheduleIndexChartResize());
-  [els.priceChart, els.scoreChart, els.scoreDeltaChart].forEach((element) => {
-    if (element) state.chartResizeObserver.observe(element);
-  });
+  indexChartObservedElements().forEach((element) => state.chartResizeObserver.observe(element));
 }
 
 function chartElementSize(element) {
@@ -791,6 +910,13 @@ function syncIndexChartRanges() {
   state.chartsSynced = true;
   const syncRangeToOtherCharts = (sourceChart, range) => {
     if (state.isSyncingChartRange || !range) return;
+    if (state.protectedIndexRange && !state.isRestoringIndexRange) {
+      stabilizeIndexVisibleLogicalRange(state.protectedIndexRange);
+      return;
+    }
+    if (!state.isRestoringIndexRange) {
+      rememberIndexVisibleLogicalRange(range);
+    }
     state.isSyncingChartRange = true;
     [state.indexChart, state.scoreChart, state.scoreDeltaChart]
       .filter((chart) => chart !== sourceChart)
@@ -865,38 +991,123 @@ function syncIndexCrosshairs() {
 function applySettlementTimeScalePadding() {
   const options = {
     rightOffset: 0,
-    barSpacing: 8,
+    barSpacing: INDEX_BAR_SPACING,
   };
   state.indexChart.timeScale().applyOptions(options);
   state.scoreChart.timeScale().applyOptions(options);
   state.scoreDeltaChart.timeScale().applyOptions(options);
 }
 
-function fitIndexChartToDataIfNeeded() {
+function initializeIndexChartVisibleRange(chartTimes, key) {
   const first = state.indexCandles[0]?.time || "";
-  const last = state.indexCandles.at(-1)?.time || "";
-  const key = `${first}:${last}:${state.indexCandles.length}`;
-  if (!first || state.indexVisibleRangeKey === key) return;
+  const last = chartTimes.at(-1) || state.indexCandles.at(-1)?.time || "";
+  if (!first || !last) return;
   state.indexVisibleRangeKey = key;
   requestAnimationFrame(() => {
-    [state.indexChart, state.scoreChart, state.scoreDeltaChart].forEach((chart) => chart?.timeScale().fitContent());
+    [state.indexChart, state.scoreChart, state.scoreDeltaChart].forEach((chart) => {
+      chart?.timeScale().setVisibleRange({ from: first, to: last });
+    });
     requestAnimationFrame(renderEventLane);
   });
 }
 
-function candlesWithSettlementWhitespace(candles) {
-  const markerDates = settlementMarkerDates();
-  const existing = new Set(candles.map((candle) => candle.time));
-  const whitespace = markerDates
-    .filter((date) => !existing.has(date))
-    .map((time) => ({ time }));
-  return [...candles, ...whitespace].sort((a, b) => String(a.time).localeCompare(String(b.time)));
+function currentIndexVisibleLogicalRange() {
+  return cloneLogicalRange(state.indexChart?.timeScale?.().getVisibleLogicalRange?.() || null);
 }
 
-function scoresWithSettlementWhitespace(scores, candles) {
-  const chartTimes = candlesWithSettlementWhitespace(candles).map((item) => item.time);
+function restoreIndexVisibleLogicalRange(range) {
+  stabilizeIndexVisibleLogicalRange(range);
+}
+
+function rememberIndexVisibleLogicalRange(range) {
+  const cloned = cloneLogicalRange(range);
+  if (cloned) state.lastIndexVisibleLogicalRange = cloned;
+}
+
+function cloneLogicalRange(range) {
+  if (!range || !Number.isFinite(range.from) || !Number.isFinite(range.to)) return null;
+  return { from: range.from, to: range.to };
+}
+
+function stabilizeIndexVisibleLogicalRange(range, frames = 6) {
+  const target = cloneLogicalRange(range);
+  if (!target) return;
+  const token = ++state.indexRangeRestoreToken;
+  state.protectedIndexRange = target;
+  const restore = (remaining) => {
+    if (token !== state.indexRangeRestoreToken) return;
+    state.isRestoringIndexRange = true;
+    [state.indexChart, state.scoreChart, state.scoreDeltaChart].forEach((chart) => {
+      chart?.timeScale().setVisibleLogicalRange(target);
+    });
+    state.isRestoringIndexRange = false;
+    renderEventLane();
+    if (remaining > 0) {
+      requestAnimationFrame(() => restore(remaining - 1));
+    } else if (token === state.indexRangeRestoreToken) {
+      state.protectedIndexRange = null;
+      rememberIndexVisibleLogicalRange(target);
+    }
+  };
+  requestAnimationFrame(() => {
+    restore(frames);
+  });
+}
+
+function indexChartTimeKey(chartTimes) {
+  const first = chartTimes[0] || "";
+  const last = chartTimes.at(-1) || "";
+  return `${first}:${last}:${chartTimes.length}`;
+}
+
+function indexChartValueKey(candles, scores, scoreDeltas) {
+  const candleKey = candles
+    .map((candle) => [candle.time, candle.open, candle.high, candle.low, candle.close].map(chartValueKeyPart).join(","))
+    .join("|");
+  const scoreKey = scores.map((score) => [score.time, score.value].map(chartValueKeyPart).join(",")).join("|");
+  const deltaKey = scoreDeltas.map((score) => [score.time, score.value].map(chartValueKeyPart).join(",")).join("|");
+  return `${candleKey}::${scoreKey}::${deltaKey}`;
+}
+
+function chartValueKeyPart(value) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number.toFixed(6) : String(value || "");
+}
+
+function indexChartTimes(candles) {
+  const existing = new Set(candles.map((candle) => candle.time));
+  const whitespaceDates = [
+    ...settlementMarkerDates(),
+    ...trailingTradingWhitespaceDates(candles, INDEX_TRAILING_WHITESPACE_DAYS),
+  ].filter((date) => !existing.has(date));
+  return unique([...candles.map((candle) => candle.time), ...whitespaceDates])
+    .sort((a, b) => String(a).localeCompare(String(b)));
+}
+
+function candlesWithSettlementWhitespace(candles, chartTimes = indexChartTimes(candles)) {
+  const candleMap = new Map(candles.map((candle) => [candle.time, candle]));
+  return chartTimes.map((time) => candleMap.get(time) || { time });
+}
+
+function scoresWithSettlementWhitespace(scores, chartTimes) {
   const scoreMap = new Map(scores.map((score) => [score.time, score]));
   return chartTimes.map((time) => scoreMap.get(time) || { time });
+}
+
+function trailingTradingWhitespaceDates(candles, count) {
+  const last = parseDate(candles.at(-1)?.time);
+  if (!last || count <= 0) return [];
+  const dates = [];
+  const cursor = addDays(last, 1);
+  while (dates.length < count) {
+    const text = toDateInput(cursor);
+    const day = cursor.getDay();
+    if (day !== 0 && day !== 6 && !KNOWN_TWSE_CLOSED_DATES.has(text)) {
+      dates.push(text);
+    }
+    cursor.setDate(cursor.getDate() + 1);
+  }
+  return dates;
 }
 
 function settlementMarkerDates() {
@@ -1663,8 +1874,11 @@ function renderRiskAndAdvice() {
 
 async function fetchIndexCandles(options = {}) {
   if (state.isFetchingIndex) return;
-  const startDate = els.startDateInput.value;
   const endDate = els.endDateInput.value;
+  const startDate = autoIndexStartDateForChart(els.startDateInput.value, endDate);
+  if (startDate && startDate !== els.startDateInput.value) {
+    els.startDateInput.value = startDate;
+  }
   if (!startDate || !endDate) return;
   state.isFetchingIndex = true;
   els.fetchIndexBtn.disabled = true;
@@ -1723,7 +1937,7 @@ async function fetchIndexCandles(options = {}) {
       .map((date) => candlesByDate.get(date))
       .filter(Boolean);
     const droppedCount = tradingDates.length - mergedCandles.length;
-    const candles = mergedCandles.slice(-120);
+    const candles = mergedCandles;
 
     if (!candles.length) throw new Error("查無 TAIEX 資料，可能是假日、權限或請求額度限制。");
     state.indexCandles = candles;
@@ -1738,7 +1952,7 @@ async function fetchIndexCandles(options = {}) {
       : `，最新交易日 ${latestTradingDate} 沒有可用五秒資料，保留日資料`;
     const latestWarning = !latestCandle && latestFetchError ? `；五秒資料警告：${latestFetchError}` : "";
     els.marketStatus.textContent = `已更新 ${candles.length} 根加權指數日線（${sourceLabel}）${droppedText}${latestText}${latestWarning}。`;
-    renderAll();
+    renderAll({ indexChart: true });
   } catch (error) {
     const fallbackText = options.auto ? "，目前保留示範日線" : "";
     els.marketStatus.textContent = `FinMind 抓取失敗：${error.message}${fallbackText}`;
@@ -1819,6 +2033,7 @@ function normalizeDailyCandles(rows) {
 async function fetchRealtimeQuotes(options = {}) {
   if (state.isFetchingQuotes) return;
   state.isFetchingQuotes = true;
+  let indexResizeObserverPaused = false;
   const shouldAnnounce = !options.refresh;
   if (shouldAnnounce) {
     if (els.fetchOptionsBtn) els.fetchOptionsBtn.disabled = true;
@@ -1836,6 +2051,8 @@ async function fetchRealtimeQuotes(options = {}) {
       .filter((row) => row && row.strike > 0)
       .sort((a, b) => a.strike - b.strike);
     if (!filtered.length) throw new Error("查無 TXO 月選擇權 snapshot，請確認 sponsor 權限或 token。");
+    indexResizeObserverPaused = suspendIndexChartResizeObserver();
+    const indexRangeBeforeQuoteRender = currentIndexVisibleLogicalRange() || state.lastIndexVisibleLogicalRange;
     state.futuresQuote = futuresQuote;
     state.futuresQuotes = futuresRows;
     if (indexQuote) {
@@ -1852,12 +2069,16 @@ async function fetchRealtimeQuotes(options = {}) {
       els.optionStatus.textContent = `已讀取 ${filtered.length} 筆 TXO snapshot；近月台指期 ${futuresQuote.futures_id} ${formatNumber(futuresQuote.close, 0)}${indexText}${latestTime ? `，行情 ${latestTime}` : ""}${cacheTime}${warningText}。`;
     }
     renderAll();
+    stabilizeIndexVisibleLogicalRange(indexRangeBeforeQuoteRender, 12);
+    resumeIndexChartResizeObserver(indexResizeObserverPaused);
+    indexResizeObserverPaused = false;
   } catch (error) {
     const fallbackText = options.auto ? "，目前保留示範選擇權鏈" : "";
     if (shouldAnnounce) {
       if (els.optionStatus) els.optionStatus.textContent = `自動化部位即時報價讀取失敗：${error.message}${fallbackText}`;
     }
   } finally {
+    resumeIndexChartResizeObserver(indexResizeObserverPaused);
     if (shouldAnnounce && els.fetchOptionsBtn) els.fetchOptionsBtn.disabled = false;
     state.isFetchingQuotes = false;
   }
