@@ -14,6 +14,7 @@ from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 import requests
+from dotenv import load_dotenv
 
 try:
     from .fugle_live import FugleLiveTQuoteService
@@ -50,17 +51,10 @@ def load_env_token() -> str:
 
 
 def load_env_value(target_key: str) -> str:
-    env_path = ROOT / ".env"
-    if not env_path.exists():
-        return ""
-    for line in env_path.read_text(encoding="utf-8").splitlines():
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#") or "=" not in stripped:
-            continue
-        key, value = stripped.split("=", 1)
-        if key.strip() == target_key:
-            return value.strip().strip("'\"")
-    return ""
+    if value := os.environ.get(target_key):
+        return value
+    load_dotenv(ROOT / ".env", override=False)
+    return os.environ.get(target_key, "")
 
 
 def utc_now() -> str:

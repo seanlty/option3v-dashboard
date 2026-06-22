@@ -23,7 +23,7 @@ quant-assistant/
 └─ .gitignore
 ```
 
-`data/raw/` 與 `data/processed/` 預設不納入 Git，只保留 `.gitkeep` 讓資料夾存在。API key 請放在 `.env`，不要直接提交到 repo。
+`data/raw/` 與 `data/processed/` 預設不納入 Git，只保留 `.gitkeep` 讓資料夾存在。API key 部署時請放在平台環境變數；本機開發可放 `.env`，不要直接提交到 repo。
 
 ## Python 開發環境
 
@@ -59,7 +59,7 @@ http://127.0.0.1:8765/index.html
 python src\main.py
 ```
 
-服務會讀取平台提供的 `PORT`，並預設綁定 `0.0.0.0`。第一階段不需要 Zeabur PostgreSQL、Redis 或 Volume；行情 snapshot 預設使用記憶體快取，避免多人連線時產生 server disk I/O。若要在開發環境保留 Fugle snapshot 檔案，可設定 `FUGLE_SNAPSHOT_DISK_CACHE=1`。
+服務會讀取平台提供的 `PORT`，並預設綁定 `0.0.0.0`。`FINMIND_TOKEN` 與 `FUGLE_TOKEN` 會先讀取 Zeabur 環境變數，沒有時才使用本機 `.env`。第一階段不需要 Zeabur PostgreSQL、Redis 或 Volume；行情 snapshot 預設使用記憶體快取，避免多人連線時產生 server disk I/O。若要在開發環境保留 Fugle snapshot 檔案，可設定 `FUGLE_SNAPSHOT_DISK_CACHE=1`。
 
 ## 已完成
 

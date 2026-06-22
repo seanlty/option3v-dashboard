@@ -20,6 +20,7 @@ from zoneinfo import ZoneInfo
 
 import requests
 import websockets
+from dotenv import load_dotenv
 
 try:
     from .quote_snapshot_cache import (
@@ -259,7 +260,7 @@ class FugleLiveTQuoteService:
             return
         self.started = True
         if not self.token:
-            self.state.update(status="disabled", error="FUGLE_TOKEN is not configured in .env")
+            self.state.update(status="disabled", error="FUGLE_TOKEN is not configured in environment variables or .env")
             return
         try:
             universe = prepare_universe(self.token, self.contract, self.strike_count, self.after_hours)
@@ -407,16 +408,13 @@ def unique_bool_order(first: bool) -> list[bool]:
 
 
 def load_env_token() -> str:
-    env_path = ROOT / ".env"
-    if not env_path.exists():
-        return ""
-    for line in env_path.read_text(encoding="utf-8").splitlines():
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#") or "=" not in stripped:
-            continue
-        key, value = stripped.split("=", 1)
-        if key.strip() in {"FUGLE_TOKEN", "FUGLE_API_KEY", "FUGLE_MARKETDATA_API_KEY"}:
-            return value.strip().strip("'\"")
+    for key in ("FUGLE_TOKEN", "FUGLE_API_KEY", "FUGLE_MARKETDATA_API_KEY"):
+        if token := os.environ.get(key):
+            return token
+    load_dotenv(ROOT / ".env", override=False)
+    for key in ("FUGLE_TOKEN", "FUGLE_API_KEY", "FUGLE_MARKETDATA_API_KEY"):
+        if token := os.environ.get(key):
+            return token
     return ""
 
 
@@ -1287,7 +1285,7 @@ HTML = """<!doctype html>
 def run_demo(host: str, port: int, contract: str, strike_count: int, after_hours: bool) -> None:
     token = load_env_token()
     if not token:
-        raise SystemExit("FUGLE_TOKEN is not configured in .env")
+        raise SystemExit("FUGLE_TOKEN is not configured in environment variables or .env")
 
     state = DemoState(contract=contract, after_hours=after_hours)
     universe = prepare_universe(token, contract, strike_count, after_hours)

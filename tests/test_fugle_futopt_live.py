@@ -1,10 +1,12 @@
 import asyncio
 import json
+import os
 import re
 from pathlib import Path
 
 import pytest
 import requests
+from dotenv import load_dotenv
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -15,23 +17,20 @@ SETTLEMENT_DATE = "2026-07-15"
 
 
 def load_env_token() -> str:
-    env_path = ROOT / ".env"
-    if not env_path.exists():
-        return ""
-    for line in env_path.read_text(encoding="utf-8").splitlines():
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#") or "=" not in stripped:
-            continue
-        key, value = stripped.split("=", 1)
-        if key.strip() in {"FUGLE_TOKEN", "FUGLE_API_KEY", "FUGLE_MARKETDATA_API_KEY"}:
-            return value.strip().strip("'\"")
+    for key in ("FUGLE_TOKEN", "FUGLE_API_KEY", "FUGLE_MARKETDATA_API_KEY"):
+        if token := os.environ.get(key):
+            return token
+    load_dotenv(ROOT / ".env", override=False)
+    for key in ("FUGLE_TOKEN", "FUGLE_API_KEY", "FUGLE_MARKETDATA_API_KEY"):
+        if token := os.environ.get(key):
+            return token
     return ""
 
 
 def fugle_token() -> str:
     token = load_env_token()
     if not token:
-        pytest.skip("FUGLE_TOKEN is not configured in .env")
+        pytest.skip("FUGLE_TOKEN is not configured in environment variables or .env")
     return token
 
 
