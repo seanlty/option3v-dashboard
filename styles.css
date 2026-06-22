@@ -207,6 +207,43 @@ label span {
   color: #ffffff;
 }
 
+.position-toolbar {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.storage-status {
+  background: var(--surface-alt);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--muted);
+  display: inline-flex;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.2;
+  padding: 7px 10px;
+  white-space: nowrap;
+}
+
+.storage-status.warning {
+  background: #fff8e6;
+  border-color: #f0d48a;
+  color: var(--amber);
+}
+
+.portfolio-actions {
+  display: inline-flex;
+  gap: 6px;
+}
+
+.portfolio-actions .ghost-action {
+  min-height: 32px;
+  padding: 6px 10px;
+}
+
 .panel-tabs {
   align-items: center;
   background: var(--surface-alt);
@@ -765,6 +802,7 @@ tbody tr:last-child td {
   max-width: 100%;
   min-width: 0;
   overflow: hidden;
+  position: relative;
   width: 100%;
 }
 
@@ -775,6 +813,53 @@ tbody tr:last-child td {
 
 .chart-main {
   height: 390px;
+}
+
+.futures-chart-header {
+  align-items: center;
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
+  margin: 0 0 8px;
+}
+
+.futures-chart-header strong {
+  color: var(--ink);
+  display: block;
+  font-size: 15px;
+}
+
+.futures-chart-header span {
+  color: var(--muted);
+  display: block;
+  font-size: 12px;
+  margin-top: 3px;
+}
+
+.futures-time-axis {
+  bottom: 2px;
+  color: #334155;
+  font-size: 11px;
+  height: 18px;
+  left: 0;
+  pointer-events: none;
+  position: absolute;
+  right: 72px;
+  z-index: 5;
+}
+
+.futures-time-axis span {
+  background: rgba(255, 255, 255, 0.86);
+  line-height: 18px;
+  padding: 0 2px;
+  position: absolute;
+  top: 0;
+  transform: translateX(-50%);
+  white-space: nowrap;
+}
+
+.futures-time-axis span.edge-left {
+  transform: translateX(0);
 }
 
 .event-lane {
@@ -1328,6 +1413,10 @@ tbody tr:last-child td {
 
   .panel-header > :last-child {
     margin-top: 10px;
+  }
+
+  .position-toolbar {
+    justify-content: flex-start;
   }
 
   .data-controls .provider-note {

@@ -1,11 +1,15 @@
 const POINT_VALUE = 50;
 const STORAGE_KEY = "txo-dashboard-positions-v1";
+const PORTFOLIO_EXPORT_VERSION = 1;
+const MAX_IMPORTED_POSITIONS = 500;
 const FINMIND_URL = "https://api.finmindtrade.com/api/v4/data";
 const T_QUOTE_STRIKE_RANGE = 5000;
 const SAMPLE_MONTHLY_STRIKE_STEP = 100;
 const QUOTE_POLL_MS = 5000;
 const INDEX_TRAILING_WHITESPACE_DAYS = 4;
 const INDEX_BAR_SPACING = 8;
+const TAIPEI_TIME_ZONE = "Asia/Taipei";
+const FUTURES_1M_TICK_MINUTES = 15;
 const FUTURE_SPECS = {
   TXF: { label: "大台 TXF", multiplier: 200, aliases: ["TXF"] },
   MXF: { label: "小台 MXF", multiplier: 50, aliases: ["MXF", "MTX"] },
@@ -16,6 +20,26 @@ const FUTURE_ALIAS_TO_PRODUCT = Object.fromEntries(
 );
 const KNOWN_TWSE_CLOSED_DATES = new Set(["2026-05-01"]);
 const CHART_PRICE_SCALE_WIDTH = 72;
+const TAIPEI_MINUTE_FORMATTER = new Intl.DateTimeFormat("zh-TW", {
+  timeZone: TAIPEI_TIME_ZONE,
+  hour: "2-digit",
+  minute: "2-digit",
+  hour12: false,
+});
+const TAIPEI_DATE_TIME_FORMATTER = new Intl.DateTimeFormat("zh-TW", {
+  timeZone: TAIPEI_TIME_ZONE,
+  month: "2-digit",
+  day: "2-digit",
+  hour: "2-digit",
+  minute: "2-digit",
+  hour12: false,
+});
+const TAIPEI_TIME_PART_FORMATTER = new Intl.DateTimeFormat("en-US", {
+  timeZone: TAIPEI_TIME_ZONE,
+  hour: "2-digit",
+  minute: "2-digit",
+  hour12: false,
+});
 const FALLBACK_SETTLEMENT_DATES = [
   "2022-01-19", "2022-02-16", "2022-03-16", "2022-04-20", "2022-05-18", "2022-06-15", "2022-07-20", "2022-08-17", "2022-09-21", "2022-10-19", "2022-11-16", "2022-12-21",
   "2023-01-30", "2023-02-15", "2023-03-15", "2023-04-19", "2023-05-17", "2023-06-21", "2023-07-19", "2023-08-16", "2023-09-20", "2023-10-18", "2023-11-15", "2023-12-20",
@@ -34,6 +58,13 @@ const state = {
   automationPositions: [],
   futuresQuote: null,
   futuresQuotes: [],
+  futures1m: null,
+  futures1mChart: null,
+  futures1mSeries: null,
+  futures1mEventSource: null,
+  futures1mDataKey: "",
+  futures1mResizeFrame: null,
+  futures1mAxisFrame: null,
   fugleTQuote: null,
   fugleTQuoteEventSource: null,
   tVixResizeFrame: null,
@@ -87,10 +118,12 @@ document.addEventListener("DOMContentLoaded", () => {
   fetchIndexCandles({ auto: true });
   fetchRealtimeQuotes({ auto: true });
   connectFugleTQuote();
+  connectFutures1m();
   window.setInterval(() => fetchRealtimeQuotes({ auto: true, refresh: true }), QUOTE_POLL_MS);
   window.addEventListener("resize", () => {
     drawPayoff();
     scheduleIndexChartResize();
+    scheduleFutures1mChartResize();
     scheduleTQuoteVixChartResize();
   });
 });
@@ -99,6 +132,10 @@ function bindElements() {
   Object.assign(els, {
     positionForm: document.querySelector("#positionForm"),
     addPositionBtn: document.querySelector("#addPositionBtn"),
+    exportPortfolioBtn: document.querySelector("#exportPortfolioBtn"),
+    importPortfolioBtn: document.querySelector("#importPortfolioBtn"),
+    portfolioImportInput: document.querySelector("#portfolioImportInput"),
+    portfolioStorageStatus: document.querySelector("#portfolioStorageStatus"),
     entryPriceLabel: document.querySelector("#entryPriceLabel"),
     expiryLabel: document.querySelector("#expiryLabel"),
     positionsBody: document.querySelector("#positionsBody"),
@@ -148,12 +185,19 @@ function bindElements() {
     tVixChart: document.querySelector("#tVixChart"),
     marketIndexPane: document.querySelector("#marketIndexPane"),
     marketFuturesPane: document.querySelector("#marketFuturesPane"),
+    futures1mChart: document.querySelector("#futures1mChart"),
+    futures1mStatus: document.querySelector("#futures1mStatus"),
+    futures1mTitle: document.querySelector("#futures1mTitle"),
+    futures1mMeta: document.querySelector("#futures1mMeta"),
   });
 }
 
 function bindEvents() {
   els.positionForm.addEventListener("submit", handleAddPosition);
   els.addPositionBtn.addEventListener("click", handleAddPosition);
+  els.exportPortfolioBtn?.addEventListener("click", exportPortfolio);
+  els.importPortfolioBtn?.addEventListener("click", () => els.portfolioImportInput?.click());
+  els.portfolioImportInput?.addEventListener("change", importPortfolio);
   els.positionForm.elements.instrument.addEventListener("change", updatePositionFormMode);
   updatePositionFormMode();
   els.spotInput?.addEventListener("input", () => {
@@ -192,6 +236,7 @@ function bindEvents() {
   });
   populateStrategyFilters();
   observeIndexChartSize();
+  window.addEventListener("storage", handlePortfolioStorageEvent);
 }
 
 function switchMarketTab(tab) {
@@ -203,6 +248,7 @@ function switchMarketTab(tab) {
   if (els.marketIndexPane) els.marketIndexPane.hidden = !showIndex;
   if (els.marketFuturesPane) els.marketFuturesPane.hidden = showIndex;
   if (showIndex) scheduleIndexChartResize();
+  else renderFutures1mChart();
 }
 
 function switchRegimeTab(tab) {
@@ -337,18 +383,82 @@ function settlementDates() {
 function loadPositions() {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
-    state.positions = raw ? JSON.parse(raw) : defaultPositions();
+    state.positions = raw ? readStoredPositions(raw) : defaultPositions();
+    setPortfolioStorageStatus(raw ? "本機已載入" : "示範部位");
   } catch (error) {
     state.positions = defaultPositions();
+    setPortfolioStorageStatus("本機讀取失敗", "warning");
   }
 }
 
 function savePositions() {
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(state.positions));
+    setPortfolioStorageStatus(`本機已儲存 ${formatLocalTime(new Date())}`);
   } catch (error) {
+    setPortfolioStorageStatus("本機儲存受限", "warning");
     // Some embedded/local browser contexts block storage; the in-memory state still works.
   }
+}
+
+function readStoredPositions(raw) {
+  const parsed = JSON.parse(raw);
+  const positions = Array.isArray(parsed) ? parsed : parsed?.positions;
+  return normalizeImportedPositions(positions, { allowEmpty: true });
+}
+
+function normalizeImportedPositions(positions, options = {}) {
+  if (!Array.isArray(positions)) {
+    throw new Error("部位檔案格式錯誤。");
+  }
+  const normalized = positions
+    .slice(0, MAX_IMPORTED_POSITIONS)
+    .map(normalizeImportedPosition)
+    .filter(Boolean);
+  if (!normalized.length && !options.allowEmpty) {
+    throw new Error("部位檔案沒有可用部位。");
+  }
+  return normalized;
+}
+
+function normalizeImportedPosition(position) {
+  if (!position || typeof position !== "object") return null;
+  const instrument = position.instrument === "future" ? "future" : "option";
+  const kind = position.kind === "live" ? "live" : "sim";
+  const side = position.side === "short" ? "short" : "long";
+  const qty = Math.max(1, number(position.qty, 1));
+  const premium = Math.max(0, number(position.premium, 0));
+  const expiry = String(position.expiry || "");
+  const base = {
+    id: typeof position.id === "string" && position.id ? position.id : makeId(),
+    kind,
+    instrument,
+    side,
+    qty,
+    premium,
+    expiry,
+  };
+  const contract = String(position.contract || expiryToContract(expiry) || "");
+  if (contract) base.contract = contract;
+  const market = number(position.market, NaN);
+  if (Number.isFinite(market) && market > 0) base.market = market;
+  if (instrument === "future") {
+    return {
+      ...base,
+      product: normalizeFutureProduct(position.product),
+    };
+  }
+  return {
+    ...base,
+    type: position.type === "put" ? "put" : "call",
+    strike: Math.max(1, number(position.strike, 0)),
+  };
+}
+
+function setPortfolioStorageStatus(text, tone = "") {
+  if (!els.portfolioStorageStatus) return;
+  els.portfolioStorageStatus.textContent = text;
+  els.portfolioStorageStatus.classList.toggle("warning", tone === "warning");
 }
 
 function defaultPositions() {
@@ -471,6 +581,57 @@ function handlePositionAction(event) {
     state.positions.push({ ...source, id: makeId(), kind: "sim" });
     savePositions();
     renderAll();
+  }
+}
+
+function exportPortfolio() {
+  const exportedAt = new Date();
+  const payload = {
+    schema: "txo-dashboard-portfolio",
+    version: PORTFOLIO_EXPORT_VERSION,
+    exported_at: exportedAt.toISOString(),
+    positions: state.positions,
+  };
+  const blob = new Blob([`${JSON.stringify(payload, null, 2)}\n`], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = `txo-portfolio-${filenameTimestamp(exportedAt)}.json`;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+  setPortfolioStorageStatus(`已匯出 ${formatLocalTime(exportedAt)}`);
+}
+
+async function importPortfolio(event) {
+  const file = event.target.files?.[0];
+  if (!file) return;
+  try {
+    const text = await file.text();
+    const parsed = JSON.parse(text);
+    const positions = normalizeImportedPositions(Array.isArray(parsed) ? parsed : parsed.positions, { allowEmpty: true });
+    state.positions = positions;
+    syncPositionMarketPrices();
+    savePositions();
+    renderAll();
+    setPortfolioStorageStatus(`已匯入 ${formatLocalTime(new Date())}`);
+  } catch (error) {
+    setPortfolioStorageStatus(`匯入失敗：${error.message}`, "warning");
+  } finally {
+    event.target.value = "";
+  }
+}
+
+function handlePortfolioStorageEvent(event) {
+  if (event.key !== STORAGE_KEY || event.newValue === null) return;
+  try {
+    state.positions = readStoredPositions(event.newValue);
+    syncPositionMarketPrices();
+    renderAll();
+    setPortfolioStorageStatus(`本機已同步 ${formatLocalTime(new Date())}`);
+  } catch (error) {
+    setPortfolioStorageStatus("本機同步失敗", "warning");
   }
 }
 
@@ -707,7 +868,7 @@ function drawLegend(ctx, width, pad) {
 
 function renderPayoffStats(points) {
   const extremes = expiryPayoffExtremes();
-  const breakevens = findBreakevens(points);
+  const breakevens = state.positions.length ? findBreakevens(points) : [];
   const atSpot = portfolioPayoff(state.spot);
   const priceLevels = positionPriceLevels();
   const strikeRange = priceLevels.length
@@ -719,7 +880,7 @@ function renderPayoffStats(points) {
     ["現價到期損益", formatMoney(atSpot), atSpot >= 0 ? "positive" : "negative"],
     ["最大利潤", maxProfitText, "positive"],
     ["最大損失", maxLossText, "negative"],
-    ["兩平點", breakevens.length ? breakevens.map((item) => formatNumber(item, 0)).join(" / ") : "無", ""],
+    ["兩平點", state.positions.length ? (breakevens.length ? breakevens.map((item) => formatNumber(item, 0)).join(" / ") : "無") : "0", ""],
     ["履約/建倉價範圍", strikeRange, ""],
     ["到期損益區間", `${maxLossText} ~ ${maxProfitText}`, ""],
   ].map(([label, value, className]) => `
@@ -1169,6 +1330,259 @@ function renderFallbackChart() {
     else ctx.lineTo(x, y(item.close));
   });
   ctx.stroke();
+}
+
+function connectFutures1m() {
+  fetchFutures1mSnapshot();
+  if (!window.EventSource) {
+    if (els.futures1mStatus) els.futures1mStatus.textContent = "瀏覽器不支援 EventSource，改用手動刷新。";
+    return;
+  }
+  if (state.futures1mEventSource) {
+    state.futures1mEventSource.close();
+  }
+  const source = new EventSource("/api/live/futures-1m-events");
+  state.futures1mEventSource = source;
+  source.onmessage = (event) => {
+    try {
+      applyFutures1mPayload(JSON.parse(event.data));
+    } catch (error) {
+      if (els.futures1mStatus) els.futures1mStatus.textContent = `Fugle 台指期 1 分K 解析失敗：${error.message}`;
+    }
+  };
+  source.onerror = () => {
+    if (els.futures1mStatus) els.futures1mStatus.textContent = "Fugle 台指期 1 分K 連線中斷，等待重新連線...";
+  };
+}
+
+async function fetchFutures1mSnapshot() {
+  try {
+    const response = await fetch("/api/live/futures-1m", { cache: "no-store" });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    applyFutures1mPayload(await response.json());
+  } catch (error) {
+    if (els.futures1mStatus) els.futures1mStatus.textContent = `Fugle 台指期 1 分K 尚未可用：${error.message}`;
+  }
+}
+
+function applyFutures1mPayload(payload) {
+  state.futures1m = normalizeFutures1mPayload(payload);
+  updateFutures1mHeader();
+  renderFutures1mChart();
+}
+
+function normalizeFutures1mPayload(payload = {}) {
+  return {
+    status: payload.status || "starting",
+    symbol: payload.symbol || "",
+    contract: payload.contract || "",
+    sessionDate: payload.session_date || "",
+    sessionState: payload.session_state || "",
+    sessionLabel: payload.session_label || "",
+    sessionStart: payload.session_start || "08:45",
+    sessionEnd: payload.session_end || "13:45",
+    lastUpdated: payload.last_updated || "",
+    error: payload.error || "",
+    candles: (payload.candles || [])
+      .map(normalizeFutures1mCandle)
+      .filter(Boolean)
+      .sort((a, b) => a.time - b.time),
+  };
+}
+
+function normalizeFutures1mCandle(candle) {
+  const time = Number(candle?.time);
+  const open = Number(candle?.open);
+  const high = Number(candle?.high);
+  const low = Number(candle?.low);
+  const close = Number(candle?.close);
+  if (![time, open, high, low, close].every(Number.isFinite)) return null;
+  return {
+    time,
+    open,
+    high,
+    low,
+    close,
+    volume: Number(candle.volume) || 0,
+    timeIso: candle.time_iso || "",
+  };
+}
+
+function updateFutures1mHeader() {
+  const payload = state.futures1m;
+  if (!payload) return;
+  const symbol = payload.symbol || "TXF";
+  if (els.futures1mTitle) {
+    els.futures1mTitle.textContent = `${symbol} 早盤 1 分K`;
+  }
+  if (els.futures1mMeta) {
+    const countText = `${payload.candles.length} 根`;
+    const updatedText = payload.lastUpdated ? `更新 ${formatCacheTime(payload.lastUpdated)}` : "等待更新";
+    els.futures1mMeta.textContent = `${payload.sessionDate || "--"} / ${payload.sessionLabel || payload.sessionState || "--"} / ${countText} / ${updatedText} / 台北時間`;
+  }
+  if (els.futures1mStatus) {
+    const errorText = payload.error ? `；警告：${payload.error}` : "";
+    els.futures1mStatus.textContent = `${symbol} ${payload.sessionStart}-${payload.sessionEnd} 早盤 1 分K，X 軸每 15 分鐘顯示台北時間${errorText}`;
+  }
+}
+
+function chartTimeToDate(time) {
+  if (typeof time === "number") return new Date(time * 1000);
+  if (typeof time === "string") return new Date(time);
+  if (time && typeof time === "object") return new Date(Date.UTC(time.year, time.month - 1, time.day));
+  return new Date(NaN);
+}
+
+function taipeiTimeParts(time) {
+  const date = chartTimeToDate(time);
+  if (Number.isNaN(date.getTime())) return {};
+  return Object.fromEntries(
+    TAIPEI_TIME_PART_FORMATTER
+      .formatToParts(date)
+      .filter((part) => part.type !== "literal")
+      .map((part) => [part.type, part.value]),
+  );
+}
+
+function formatTaipeiMinute(time) {
+  const date = chartTimeToDate(time);
+  if (Number.isNaN(date.getTime())) return "";
+  return TAIPEI_MINUTE_FORMATTER.format(date);
+}
+
+function formatTaipeiDateTime(time) {
+  const date = chartTimeToDate(time);
+  if (Number.isNaN(date.getTime())) return "";
+  return TAIPEI_DATE_TIME_FORMATTER.format(date);
+}
+
+function futures1mTickMarkFormatter(time) {
+  const parts = taipeiTimeParts(time);
+  const minute = Number(parts.minute);
+  if (!Number.isFinite(minute) || minute % FUTURES_1M_TICK_MINUTES !== 0) return "";
+  return `${parts.hour}:${parts.minute}`;
+}
+
+function renderFutures1mChart() {
+  if (state.activeMarketTab !== "futures1m" || !els.futures1mChart) return;
+  if (!window.LightweightCharts) {
+    renderFutures1mFallback();
+    return;
+  }
+  const size = chartElementSize(els.futures1mChart);
+  if (!size.width || !size.height) return;
+  if (!state.futures1mChart) {
+    state.futures1mChart = LightweightCharts.createChart(els.futures1mChart, {
+      layout: { background: { type: "solid", color: "#ffffff" }, textColor: "#334155" },
+      grid: { vertLines: { color: "#edf2f7" }, horzLines: { color: "#edf2f7" } },
+      rightPriceScale: { borderColor: "#d7dee6", minimumWidth: CHART_PRICE_SCALE_WIDTH },
+      timeScale: {
+        borderColor: "#d7dee6",
+        timeVisible: true,
+        secondsVisible: false,
+        tickMarkFormatter: () => "",
+        barSpacing: 5,
+        minBarSpacing: 3,
+      },
+      localization: {
+        locale: "zh-TW",
+        timeFormatter: formatTaipeiDateTime,
+      },
+    });
+    state.futures1mSeries = state.futures1mChart.addSeries
+      ? state.futures1mChart.addSeries(LightweightCharts.CandlestickSeries, {
+          upColor: "#0f8f66",
+          downColor: "#d64545",
+          borderVisible: false,
+          wickUpColor: "#0f8f66",
+          wickDownColor: "#d64545",
+        })
+      : state.futures1mChart.addCandlestickSeries();
+    const timeScale = state.futures1mChart.timeScale();
+    if (timeScale.subscribeVisibleTimeRangeChange) {
+      timeScale.subscribeVisibleTimeRangeChange(scheduleFutures1mTimeAxis);
+    }
+  }
+  state.futures1mChart.applyOptions(size);
+  const candles = state.futures1m?.candles || [];
+  const key = futures1mDataKey(candles);
+  if (state.futures1mDataKey !== key) {
+    state.futures1mDataKey = key;
+    state.futures1mSeries.setData(candles);
+    state.futures1mChart.timeScale().fitContent();
+  }
+  scheduleFutures1mTimeAxis();
+}
+
+function renderFutures1mFallback() {
+  const payload = state.futures1m;
+  if (!els.futures1mStatus || !payload) return;
+  const last = payload.candles.at(-1);
+  els.futures1mStatus.textContent = last
+    ? `${payload.symbol} 最新 1 分K close ${formatNumber(last.close, 0)} / 共 ${payload.candles.length} 根`
+    : "尚無台指期早盤 1 分K。";
+}
+
+function futures1mDataKey(candles) {
+  const first = candles[0];
+  const last = candles.at(-1);
+  return `${first?.time || ""}:${last?.time || ""}:${last?.close || ""}:${candles.length}`;
+}
+
+function ensureFutures1mTimeAxis() {
+  if (!els.futures1mChart) return null;
+  let axis = els.futures1mChart.querySelector(".futures-time-axis");
+  if (!axis) {
+    axis = document.createElement("div");
+    axis.className = "futures-time-axis";
+    els.futures1mChart.appendChild(axis);
+  }
+  return axis;
+}
+
+function renderFutures1mTimeAxis() {
+  const axis = ensureFutures1mTimeAxis();
+  if (!axis || !state.futures1mChart) return;
+  const candles = state.futures1m?.candles || [];
+  axis.innerHTML = "";
+  if (!candles.length) return;
+  const chartWidth = els.futures1mChart.clientWidth || 0;
+  const maxX = chartWidth - CHART_PRICE_SCALE_WIDTH - 8;
+  const fragment = document.createDocumentFragment();
+  candles.forEach((candle) => {
+    if (!futures1mTickMarkFormatter(candle.time)) return;
+    const x = state.futures1mChart.timeScale().timeToCoordinate(candle.time);
+    if (!Number.isFinite(x) || x < 0 || x > maxX) return;
+    const label = document.createElement("span");
+    if (x < 22) {
+      label.className = "edge-left";
+      label.style.left = `${Math.max(2, x)}px`;
+    } else {
+      label.style.left = `${x}px`;
+    }
+    label.textContent = formatTaipeiMinute(candle.time);
+    fragment.appendChild(label);
+  });
+  axis.appendChild(fragment);
+}
+
+function scheduleFutures1mTimeAxis() {
+  if (state.futures1mAxisFrame) cancelAnimationFrame(state.futures1mAxisFrame);
+  state.futures1mAxisFrame = requestAnimationFrame(() => {
+    state.futures1mAxisFrame = null;
+    renderFutures1mTimeAxis();
+  });
+}
+
+function scheduleFutures1mChartResize() {
+  if (state.futures1mResizeFrame) cancelAnimationFrame(state.futures1mResizeFrame);
+  state.futures1mResizeFrame = requestAnimationFrame(() => {
+    state.futures1mResizeFrame = null;
+    if (state.futures1mChart && els.futures1mChart) {
+      state.futures1mChart.applyOptions(chartElementSize(els.futures1mChart));
+      scheduleFutures1mTimeAxis();
+    }
+  });
 }
 
 function calculateOpScores(candles) {
@@ -2040,7 +2454,7 @@ async function fetchRealtimeQuotes(options = {}) {
     if (els.optionStatus) els.optionStatus.textContent = "正在讀取自動化部位即時報價資料...";
   }
   try {
-    const payload = await localQuoteCache({ force: !options.auto && !options.refresh });
+    const payload = await localQuoteCache({ force: options.forceServerRefresh === true });
     const futuresRows = (payload.futures || []).map(normalizeFuturesSnapshotRow).filter(Boolean);
     const futuresQuote = selectFrontMonthFuture(futuresRows, "TXF");
     if (!futuresQuote) throw new Error("查無近月台指期貨 snapshot。");
@@ -2087,8 +2501,10 @@ async function fetchRealtimeQuotes(options = {}) {
 async function localQuoteCache(options = {}) {
   const urls = [
     new URL("/api/latest-quotes", window.location.origin),
-    new URL("http://127.0.0.1:8766/api/latest-quotes"),
   ];
+  if (["localhost", "127.0.0.1"].includes(window.location.hostname)) {
+    urls.push(new URL("http://127.0.0.1:8766/api/latest-quotes"));
+  }
   if (options.force) {
     urls.forEach((url) => url.searchParams.set("force", "1"));
   }
@@ -2410,6 +2826,24 @@ function formatCacheTime(value) {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return value;
   return date.toLocaleTimeString("zh-TW", { hour12: false });
+}
+
+function formatLocalTime(date) {
+  if (!(date instanceof Date) || Number.isNaN(date.getTime())) return "";
+  return date.toLocaleTimeString("zh-TW", { hour12: false, hour: "2-digit", minute: "2-digit" });
+}
+
+function filenameTimestamp(date) {
+  const pad = (value) => String(value).padStart(2, "0");
+  return [
+    date.getFullYear(),
+    pad(date.getMonth() + 1),
+    pad(date.getDate()),
+    "-",
+    pad(date.getHours()),
+    pad(date.getMinutes()),
+    pad(date.getSeconds()),
+  ].join("");
 }
 
 function filteredPositions() {

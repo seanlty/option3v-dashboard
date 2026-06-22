@@ -49,10 +49,23 @@ http://127.0.0.1:8765/index.html
 
 `src/main.py` 會同時提供靜態頁面與 `/api/latest-quotes`，後端每 30 秒抓一次 FinMind `taiwan_futures_snapshot` 與 `taiwan_options_snapshot` 並快取，前端只讀本機快取。
 
+## 部署策略
+
+第一階段維持 local-first，不接資料庫。使用者部位只存在瀏覽器 `localStorage`，並可從部位明細區匯出/匯入 JSON 檔做本機備份或跨裝置搬移；payoff、Greeks 與風險摘要都在前端計算，不會把部位送到後端。
+
+部署到 Zeabur 時可直接啟動 Python service：
+
+```powershell
+python src\main.py
+```
+
+服務會讀取平台提供的 `PORT`，並預設綁定 `0.0.0.0`。第一階段不需要 Zeabur PostgreSQL、Redis 或 Volume；行情 snapshot 預設使用記憶體快取，避免多人連線時產生 server disk I/O。若要在開發環境保留 Fugle snapshot 檔案，可設定 `FUGLE_SNAPSHOT_DISK_CACHE=1`。
+
 ## 已完成
 
 - 部位明細表
 - 新增、刪除、複製模擬部位
+- 本機部位匯出/匯入 JSON
 - 總部位 payoff 圖
 - Black-Scholes 理論價、IV 反推、Greeks
 - 風險摘要與盤勢判別建議
@@ -74,5 +87,5 @@ http://127.0.0.1:8765/index.html
 
 ## 下一步建議
 
-- 用 SQLite 儲存實際部位、風險快照與每日行情。
+- 需要登入、跨裝置雲端同步、多人共編或版本歷史時，再加入 Zeabur PostgreSQL 儲存 portfolio JSON。
 - 將即時選擇權報價抽象成 provider，後續可換 TAIFEX、券商 API 或 FinMind sponsor endpoint。

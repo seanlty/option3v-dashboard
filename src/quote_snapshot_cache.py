@@ -58,10 +58,13 @@ class QuoteSnapshotStore:
         cache_dir: Path | None = None,
         ttl_seconds: int = DEFAULT_CACHE_TTL_SECONDS,
         history_interval_seconds: int = 15,
+        persist: bool = True,
     ) -> None:
         self.cache_dir = cache_dir or DEFAULT_CACHE_DIR
         self.ttl_seconds = ttl_seconds
         self.history_interval_seconds = history_interval_seconds
+        self.persist = persist
+        self.latest_snapshot: dict[str, Any] | None = None
         self.last_history_write_monotonic = 0.0
         self.last_history_snapshot_at = ""
 
@@ -76,6 +79,9 @@ class QuoteSnapshotStore:
     def write(self, snapshot: dict[str, Any]) -> None:
         if not snapshot_has_usable_quotes(snapshot):
             return
+        self.latest_snapshot = safe_deepcopy(snapshot)
+        if not self.persist:
+            return
         self.latest_snapshot_path.parent.mkdir(parents=True, exist_ok=True)
         write_json(self.latest_snapshot_path, snapshot)
         if not self.should_write_history(snapshot):
@@ -86,6 +92,10 @@ class QuoteSnapshotStore:
         self.last_history_snapshot_at = str(snapshot.get("snapshot_at") or "")
 
     def read_latest(self, force_stale: bool = False, error: str = "") -> dict[str, Any] | None:
+        if self.latest_snapshot:
+            return mark_cached_snapshot(self.latest_snapshot, self.ttl_seconds, force_stale=force_stale, error=error)
+        if not self.persist:
+            return None
         if not self.latest_snapshot_path.exists():
             return None
         try:

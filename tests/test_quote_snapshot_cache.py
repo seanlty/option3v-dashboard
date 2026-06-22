@@ -1,6 +1,8 @@
 from pathlib import Path
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
-from src.fugle_live import mid_price
+from src.fugle_live import mid_price, normalize_future_1m_candle, regular_session_state
 from src.quote_snapshot_cache import (
     QuoteSnapshotStore,
     mark_cached_snapshot,
@@ -85,7 +87,49 @@ def test_quote_snapshot_contract_shape_and_cache_stale_state(tmp_path: Path):
     assert cached["rows"][0]["call"]["quality"]["stale"] is True
 
 
+def test_quote_snapshot_store_can_cache_without_disk_writes(tmp_path: Path):
+    snapshot = quote_snapshot_from_tquote_payload(sample_tquote_payload(), source_type="fugle_live")
+    store = QuoteSnapshotStore(cache_dir=tmp_path, ttl_seconds=60, persist=False)
+
+    store.write(snapshot)
+    cached = store.read_latest()
+
+    assert cached is not None
+    assert cached["snapshot_id"] == snapshot["snapshot_id"]
+    assert not (tmp_path / "latest_quote_snapshot.json").exists()
+
+
 def test_mid_price_requires_both_bid_and_ask():
     assert mid_price(1600, 1640) == 1620
     assert mid_price(1600, None) is None
     assert mid_price(None, 1640) is None
+
+
+def test_regular_session_state_labels_morning_session():
+    tz = ZoneInfo("Asia/Taipei")
+    payload = regular_session_state(datetime(2026, 6, 22, 9, 1, tzinfo=tz))
+    assert payload["state"] == "regular"
+    assert payload["session_date"] == "2026-06-22"
+
+
+def test_normalize_future_1m_candle_filters_regular_session():
+    assert normalize_future_1m_candle({
+        "date": "2026-06-22T08:44:00.000+08:00",
+        "open": 1,
+        "high": 1,
+        "low": 1,
+        "close": 1,
+    }) is None
+
+    candle = normalize_future_1m_candle({
+        "date": "2026-06-22T08:45:00.000+08:00",
+        "open": 23100,
+        "high": 23150,
+        "low": 23080,
+        "close": 23120,
+        "volume": 12,
+        "average": 23110,
+    })
+    assert candle["session_date"] == "2026-06-22"
+    assert candle["open"] == 23100
+    assert candle["volume"] == 12

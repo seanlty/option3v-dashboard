@@ -6,6 +6,7 @@ import argparse
 import asyncio
 import json
 import math
+import os
 import re
 import threading
 import time
@@ -15,6 +16,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
+from zoneinfo import ZoneInfo
 
 import requests
 import websockets
@@ -44,6 +46,17 @@ DEFAULT_RATE = 0.015
 VIX_SAMPLE_INTERVAL_SECONDS = 1.0
 VIX_SERIES_LIMIT = 3600
 REST_PROBE_INTERVAL_SECONDS = 30
+FUTURES_1M_REST_INTERVAL_SECONDS = 20
+TAIPEI_TZ = ZoneInfo("Asia/Taipei")
+REGULAR_SESSION_START = datetime_time(hour=8, minute=45)
+REGULAR_SESSION_END = datetime_time(hour=13, minute=45)
+
+
+def env_flag(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
 @dataclass
@@ -65,6 +78,10 @@ class DemoState:
     symbol_meta: dict[str, dict[str, Any]] = field(default_factory=dict)
     event_counts: dict[str, int] = field(default_factory=dict)
     vix_series: list[dict[str, Any]] = field(default_factory=list)
+    future_1m_candles: dict[int, dict[str, Any]] = field(default_factory=dict)
+    future_1m_session_date: str = ""
+    future_1m_last_updated: str = ""
+    future_1m_error: str = ""
     last_vix_sample_monotonic: float = 0
     last_event_at: str = ""
     last_book_at: str = ""
@@ -100,6 +117,36 @@ class DemoState:
                     self.future_price = price
             self.last_aggregate_at = now_text()
             self.record_vix_sample_unlocked()
+
+    def set_future_1m_candle(self, candle: dict[str, Any]) -> None:
+        normalized = normalize_future_1m_candle(candle)
+        if not normalized:
+            return
+        with self.lock:
+            self.future_1m_candles[normalized["time"]] = normalized
+            self.future_1m_session_date = normalized["session_date"]
+            self.future_1m_last_updated = now_text()
+            self.future_1m_error = ""
+
+    def replace_future_1m_candles(self, candles: list[dict[str, Any]], error: str = "") -> None:
+        normalized = [candle for candle in (normalize_future_1m_candle(item) for item in candles) if candle]
+        with self.lock:
+            if normalized:
+                self.future_1m_candles = {candle["time"]: candle for candle in normalized}
+                self.future_1m_session_date = normalized[-1]["session_date"]
+                self.future_1m_last_updated = now_text()
+            self.future_1m_error = error
+
+    def reset_future_1m_session_if_needed(self) -> None:
+        state = regular_session_state()
+        if state["state"] != "regular":
+            return
+        with self.lock:
+            if self.future_1m_session_date and self.future_1m_session_date != state["session_date"]:
+                self.future_1m_candles = {}
+                self.future_1m_session_date = state["session_date"]
+                self.future_1m_last_updated = now_text()
+                self.future_1m_error = ""
 
     def record_vix_sample_unlocked(self) -> None:
         current = time.monotonic()
@@ -165,6 +212,26 @@ class DemoState:
                 "rows": rows,
             }
 
+    def future_1m_snapshot(self) -> dict[str, Any]:
+        with self.lock:
+            candles = sorted(self.future_1m_candles.values(), key=lambda candle: candle["time"])
+            state = regular_session_state()
+            return {
+                "status": self.status,
+                "authenticated": self.authenticated,
+                "subscribed": self.subscribed,
+                "symbol": self.future_symbol,
+                "contract": self.contract,
+                "session_date": self.future_1m_session_date or state["session_date"],
+                "session_state": state["state"],
+                "session_label": state["label"],
+                "session_start": "08:45",
+                "session_end": "13:45",
+                "last_updated": self.future_1m_last_updated,
+                "error": self.future_1m_error or self.error,
+                "candles": candles,
+            }
+
 
 class FugleLiveTQuoteService:
     def __init__(
@@ -179,9 +246,11 @@ class FugleLiveTQuoteService:
         self.strike_count = strike_count
         self.after_hours = is_after_hours_now() if after_hours is None else after_hours
         self.state = DemoState(contract=self.contract, after_hours=self.after_hours)
-        self.snapshot_store = QuoteSnapshotStore()
+        self.snapshot_store = QuoteSnapshotStore(persist=env_flag("FUGLE_SNAPSHOT_DISK_CACHE"))
         self.rest_probe_lock = threading.Lock()
+        self.future_1m_lock = threading.Lock()
         self.last_rest_probe_monotonic = 0.0
+        self.last_future_1m_rest_monotonic = 0.0
         self.thread: threading.Thread | None = None
         self.started = False
 
@@ -230,6 +299,13 @@ class FugleLiveTQuoteService:
             return cached
         return live_snapshot
 
+    def futures_1m_snapshot(self) -> dict[str, Any]:
+        if not self.started:
+            self.start()
+        self.state.reset_future_1m_session_if_needed()
+        self._refresh_futures_1m_if_due(force=not bool(self.state.future_1m_candles))
+        return self.state.future_1m_snapshot()
+
     def cached_legacy_snapshot(self) -> dict[str, Any]:
         return legacy_tquote_from_quote_snapshot(self.quote_snapshot())
 
@@ -263,9 +339,43 @@ class FugleLiveTQuoteService:
                 errors.append(f"{'afterhours' if after_hours else 'regular'}: {error}")
         raise RuntimeError("; ".join(errors))
 
+    def _refresh_futures_1m_if_due(self, force: bool = False) -> None:
+        if not self.token or not self.state.future_symbol:
+            return
+        current = time.monotonic()
+        if not force and current - self.last_future_1m_rest_monotonic < FUTURES_1M_REST_INTERVAL_SECONDS:
+            return
+        if not self.future_1m_lock.acquire(blocking=False):
+            return
+        try:
+            self.last_future_1m_rest_monotonic = current
+            payload = fugle_get(f"/intraday/candles/{self.state.future_symbol}", self.token, timeframe="1")
+            self.state.replace_future_1m_candles(payload.get("data") or [])
+        except Exception as error:  # noqa: BLE001 - keep the previous regular-session candles visible.
+            self.state.replace_future_1m_candles([], error=str(error))
+        finally:
+            self.future_1m_lock.release()
+
 
 def now_text() -> str:
     return datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
+
+
+def taipei_now() -> datetime:
+    return datetime.now(TAIPEI_TZ)
+
+
+def regular_session_state(now: datetime | None = None) -> dict[str, str]:
+    current = (now or taipei_now()).astimezone(TAIPEI_TZ)
+    session_date = current.date()
+    clock = current.time()
+    if session_date.weekday() >= 5:
+        return {"state": "closed", "label": "非交易日，保留最後早盤 1 分K", "session_date": session_date.isoformat()}
+    if clock < REGULAR_SESSION_START:
+        return {"state": "preopen", "label": "早盤尚未開始，保留最後早盤 1 分K", "session_date": session_date.isoformat()}
+    if clock <= REGULAR_SESSION_END:
+        return {"state": "regular", "label": "早盤即時 1 分K", "session_date": session_date.isoformat()}
+    return {"state": "closed", "label": "早盤已收盤，顯示當天 08:45-13:45", "session_date": session_date.isoformat()}
 
 
 def front_month_contract() -> str:
@@ -330,6 +440,41 @@ def first_number(*values: Any) -> float | None:
         if math.isfinite(parsed):
             return parsed
     return None
+
+
+def parse_fugle_datetime(value: Any) -> datetime | None:
+    text = str(value or "")
+    if not text:
+        return None
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00")).astimezone(TAIPEI_TZ)
+    except ValueError:
+        return None
+
+
+def normalize_future_1m_candle(payload: dict[str, Any]) -> dict[str, Any] | None:
+    dt = parse_fugle_datetime(payload.get("date"))
+    if not dt:
+        return None
+    if dt.time() < REGULAR_SESSION_START or dt.time() > REGULAR_SESSION_END:
+        return None
+    open_price = first_number(payload.get("open"))
+    high = first_number(payload.get("high"))
+    low = first_number(payload.get("low"))
+    close = first_number(payload.get("close"))
+    if open_price is None or high is None or low is None or close is None:
+        return None
+    return {
+        "time": int(dt.timestamp()),
+        "time_iso": dt.isoformat(timespec="seconds"),
+        "session_date": dt.date().isoformat(),
+        "open": open_price,
+        "high": high,
+        "low": low,
+        "close": close,
+        "volume": first_number(payload.get("volume")) or 0,
+        "average": first_number(payload.get("average")),
+    }
 
 
 def settlement_date_for_contract(contract: str) -> str:
@@ -864,6 +1009,15 @@ async def fugle_books_loop(token: str, state: DemoState) -> None:
                                 "afterHours": snapshot["after_hours"],
                             },
                         }))
+                        if snapshot["future_symbol"]:
+                            await websocket.send(json.dumps({
+                                "event": "subscribe",
+                                "data": {
+                                    "channel": "candles",
+                                    "symbol": snapshot["future_symbol"],
+                                    "afterHours": False,
+                                },
+                            }))
                     elif event == "subscribed":
                         state.update(status="subscribed", subscribed=True)
                     elif event in {"snapshot", "data"} and message.get("channel") == "books":
@@ -877,6 +1031,11 @@ async def fugle_books_loop(token: str, state: DemoState) -> None:
                         symbol = data.get("symbol")
                         if symbol:
                             state.set_aggregate(symbol, data)
+                            state.update(status="live")
+                    elif event in {"snapshot", "data"} and message.get("channel") == "candles":
+                        data = message.get("data") or {}
+                        if data.get("symbol") == state.snapshot().get("future_symbol"):
+                            state.set_future_1m_candle(data)
                             state.update(status="live")
                     elif event == "error":
                         state.update(status="error", error=json.dumps(message.get("data"), ensure_ascii=False))

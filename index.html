@@ -42,10 +42,18 @@
               <h2>部位明細</h2>
               <p>實際與模擬部位會一起進入 payoff 與 Greeks 計算。</p>
             </div>
-            <div class="segmented" role="group" aria-label="部位篩選">
-              <button type="button" class="active" data-filter="all">全部</button>
-              <button type="button" data-filter="live">實際</button>
-              <button type="button" data-filter="sim">模擬</button>
+            <div class="position-toolbar">
+              <span id="portfolioStorageStatus" class="storage-status">本機儲存</span>
+              <div class="portfolio-actions" role="group" aria-label="部位檔案">
+                <button id="exportPortfolioBtn" type="button" class="ghost-action">匯出</button>
+                <button id="importPortfolioBtn" type="button" class="ghost-action">匯入</button>
+                <input id="portfolioImportInput" type="file" accept="application/json,.json" hidden />
+              </div>
+              <div class="segmented" role="group" aria-label="部位篩選">
+                <button type="button" class="active" data-filter="all">全部</button>
+                <button type="button" data-filter="live">實際</button>
+                <button type="button" data-filter="sim">模擬</button>
+              </div>
             </div>
           </div>
 
@@ -183,10 +191,15 @@
             <p id="marketStatus" class="status-line">尚未連線 FinMind，先顯示示範日線。</p>
           </div>
           <div id="marketFuturesPane" class="tab-pane" hidden>
-            <div class="placeholder-panel">
-              <strong>台指期貨每日早盤 1 分K</strong>
-              <span>歷史資料回溯與早盤 1 分 K 圖將接在這個頁籤。</span>
+            <div class="futures-chart-header">
+              <div>
+                <strong id="futures1mTitle">台指期貨早盤 1 分K</strong>
+                <span id="futures1mMeta">等待 Fugle 早盤資料...</span>
+              </div>
+              <span class="provider-note">Fugle WebSocket candles / 08:45-13:45</span>
             </div>
+            <div id="futures1mChart" class="chart-area chart-main"></div>
+            <p id="futures1mStatus" class="status-line">尚未連線 Fugle 台指期 1 分K。</p>
           </div>
         </section>
 

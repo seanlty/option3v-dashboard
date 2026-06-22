@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import threading
 import time
 from datetime import datetime, timezone
@@ -25,6 +26,23 @@ FINMIND_API_BASE = "https://api.finmindtrade.com/api/v4"
 QUOTE_REFRESH_SECONDS = 30
 FUTURES_DATA_IDS = ("TXF", "MXF", "MTX", "TMF")
 TAIEX_DATA_ID = "TAIEX"
+
+
+def env_flag(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def env_int(name: str, default: int) -> int:
+    value = os.getenv(name)
+    if not value:
+        return default
+    try:
+        return int(value)
+    except ValueError:
+        return default
 
 
 def load_env_token() -> str:
@@ -236,6 +254,7 @@ def latest_trading_date(rows: list[dict[str, Any]], start_date: str, end_date: s
 
 QUOTE_CACHE = QuoteCache(load_env_token())
 FUGLE_TQUOTE = FugleLiveTQuoteService(load_env_value("FUGLE_TOKEN"))
+ALLOW_FORCE_QUOTE_REFRESH = env_flag("ALLOW_FORCE_QUOTE_REFRESH")
 
 
 class DashboardHandler(SimpleHTTPRequestHandler):
@@ -252,7 +271,7 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         parsed = urlparse(self.path)
         if parsed.path == "/api/latest-quotes":
             query = parse_qs(parsed.query)
-            force = query.get("force", ["0"])[0] == "1"
+            force = ALLOW_FORCE_QUOTE_REFRESH and query.get("force", ["0"])[0] == "1"
             payload = QUOTE_CACHE.refresh() if force or not QUOTE_CACHE.snapshot().get("updated_at") else QUOTE_CACHE.snapshot()
             self._send_json(payload)
             return
@@ -267,6 +286,12 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             return
         if parsed.path == "/api/live/tquote-events":
             self._send_quote_snapshot_event_stream()
+            return
+        if parsed.path == "/api/live/futures-1m":
+            self._send_json(FUGLE_TQUOTE.futures_1m_snapshot())
+            return
+        if parsed.path == "/api/live/futures-1m-events":
+            self._send_futures_1m_event_stream()
             return
         if parsed.path == "/api/index-candles":
             query = parse_qs(parsed.query)
@@ -327,6 +352,22 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
                 break
 
+    def _send_futures_1m_event_stream(self) -> None:
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Connection", "keep-alive")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.end_headers()
+        while True:
+            try:
+                payload = json.dumps(FUGLE_TQUOTE.futures_1m_snapshot(), ensure_ascii=False)
+                self.wfile.write(f"data: {payload}\n\n".encode("utf-8"))
+                self.wfile.flush()
+                time.sleep(1)
+            except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+                break
+
 
 def run_server(host: str, port: int) -> None:
     QUOTE_CACHE.start()
@@ -344,8 +385,8 @@ def run_server(host: str, port: int) -> None:
 
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description="Run the local option dashboard server.")
-    parser.add_argument("--host", default="127.0.0.1")
-    parser.add_argument("--port", type=int, default=8765)
+    parser.add_argument("--host", default=os.getenv("HOST", "0.0.0.0"))
+    parser.add_argument("--port", type=int, default=env_int("PORT", 8765))
     parser.add_argument("--smoke", action="store_true", help="Run a lightweight smoke check and exit.")
     args = parser.parse_args(argv)
     if args.smoke:
