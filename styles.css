@@ -287,7 +287,7 @@ label span {
 
 .data-controls {
   align-items: end;
-  grid-template-columns: repeat(2, minmax(130px, 0.8fr)) auto minmax(180px, 1fr);
+  grid-template-columns: minmax(170px, 0.9fr) minmax(170px, 0.9fr) auto minmax(230px, 1fr) minmax(180px, 0.8fr);
 }
 
 .market-panel .data-controls {
@@ -296,6 +296,7 @@ label span {
 }
 
 .market-panel .data-controls input,
+.market-panel .data-controls select,
 .market-panel .data-controls button {
   min-height: 32px;
   padding-bottom: 5px;

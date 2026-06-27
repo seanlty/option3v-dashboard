@@ -2,7 +2,13 @@ from pathlib import Path
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from src.fugle_live import mid_price, normalize_future_1m_candle, regular_session_state
+from src.fugle_live import (
+    is_after_hours_now,
+    is_night_preopen_now,
+    mid_price,
+    normalize_future_1m_candle,
+    regular_session_state,
+)
 from src.quote_snapshot_cache import (
     QuoteSnapshotStore,
     mark_cached_snapshot,
@@ -110,6 +116,23 @@ def test_regular_session_state_labels_morning_session():
     payload = regular_session_state(datetime(2026, 6, 22, 9, 1, tzinfo=tz))
     assert payload["state"] == "regular"
     assert payload["session_date"] == "2026-06-22"
+
+
+def test_after_hours_uses_taipei_time():
+    tz = ZoneInfo("Asia/Taipei")
+
+    assert not is_after_hours_now(datetime(2026, 6, 22, 9, 1, tzinfo=tz))
+    assert is_after_hours_now(datetime(2026, 6, 22, 7, 30, tzinfo=tz))
+    assert is_after_hours_now(datetime(2026, 6, 22, 15, 1, tzinfo=tz))
+
+
+def test_night_preopen_is_between_six_and_regular_open():
+    tz = ZoneInfo("Asia/Taipei")
+
+    assert not is_night_preopen_now(datetime(2026, 6, 22, 5, 59, tzinfo=tz))
+    assert is_night_preopen_now(datetime(2026, 6, 22, 6, 0, tzinfo=tz))
+    assert is_night_preopen_now(datetime(2026, 6, 22, 8, 44, tzinfo=tz))
+    assert not is_night_preopen_now(datetime(2026, 6, 22, 8, 45, tzinfo=tz))
 
 
 def test_normalize_future_1m_candle_filters_regular_session():

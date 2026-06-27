@@ -51,6 +51,8 @@ FUTURES_1M_REST_INTERVAL_SECONDS = 20
 TAIPEI_TZ = ZoneInfo("Asia/Taipei")
 REGULAR_SESSION_START = datetime_time(hour=8, minute=45)
 REGULAR_SESSION_END = datetime_time(hour=13, minute=45)
+NIGHT_SESSION_END = datetime_time(hour=6, minute=0)
+NIGHT_PREOPEN_CACHE_MESSAGE = "夜盤已收盤，08:45 前顯示夜盤最後有效截面。"
 
 
 def env_flag(name: str, default: bool = False) -> bool:
@@ -245,13 +247,16 @@ class FugleLiveTQuoteService:
         self.token = token
         self.contract = contract or front_month_contract()
         self.strike_count = strike_count
-        self.after_hours = is_after_hours_now() if after_hours is None else after_hours
+        self.auto_after_hours = after_hours is None
+        self.after_hours = self._target_after_hours() if self.auto_after_hours else bool(after_hours)
         self.state = DemoState(contract=self.contract, after_hours=self.after_hours)
         self.snapshot_store = QuoteSnapshotStore(persist=env_flag("FUGLE_SNAPSHOT_DISK_CACHE"))
         self.rest_probe_lock = threading.Lock()
         self.future_1m_lock = threading.Lock()
         self.last_rest_probe_monotonic = 0.0
         self.last_future_1m_rest_monotonic = 0.0
+        self.force_next_rest_probe = False
+        self.session_prepare_failed = False
         self.thread: threading.Thread | None = None
         self.started = False
 
@@ -262,11 +267,7 @@ class FugleLiveTQuoteService:
         if not self.token:
             self.state.update(status="disabled", error="FUGLE_TOKEN is not configured in environment variables or .env")
             return
-        try:
-            universe = prepare_universe(self.token, self.contract, self.strike_count, self.after_hours)
-            self.state.update(**universe, status="prepared")
-        except Exception as error:  # noqa: BLE001 - keep dashboard server available.
-            self.state.update(status="error", error=str(error))
+        if not self._prepare_state_for_session(self._target_after_hours(), status="prepared"):
             return
         self.thread = threading.Thread(
             target=lambda: asyncio.run(fugle_books_loop(self.token, self.state)),
@@ -278,9 +279,15 @@ class FugleLiveTQuoteService:
     def snapshot(self) -> dict[str, Any]:
         if not self.started:
             self.start()
+        else:
+            self._refresh_session_if_needed()
         return self.state.snapshot()
 
     def quote_snapshot(self) -> dict[str, Any]:
+        if self._should_hold_night_snapshot():
+            night_snapshot = self._night_preopen_snapshot()
+            if night_snapshot:
+                return night_snapshot
         legacy = self.snapshot()
         live_snapshot = quote_snapshot_from_tquote_payload(legacy, source_type="fugle_live")
         if snapshot_has_usable_quotes(live_snapshot):
@@ -303,6 +310,8 @@ class FugleLiveTQuoteService:
     def futures_1m_snapshot(self) -> dict[str, Any]:
         if not self.started:
             self.start()
+        else:
+            self._refresh_session_if_needed()
         self.state.reset_future_1m_session_if_needed()
         self._refresh_futures_1m_if_due(force=not bool(self.state.future_1m_candles))
         return self.state.future_1m_snapshot()
@@ -313,6 +322,7 @@ class FugleLiveTQuoteService:
     def _rest_quote_snapshot_if_due(self, force: bool = False) -> dict[str, Any] | None:
         if not self.token:
             return None
+        force = force or self.force_next_rest_probe
         current = time.monotonic()
         if not force and current - self.last_rest_probe_monotonic < REST_PROBE_INTERVAL_SECONDS:
             return None
@@ -325,6 +335,7 @@ class FugleLiveTQuoteService:
             self.state.update(error=str(error))
             return None
         finally:
+            self.force_next_rest_probe = False
             self.rest_probe_lock.release()
 
     def _build_rest_quote_snapshot(self) -> dict[str, Any]:
@@ -356,6 +367,78 @@ class FugleLiveTQuoteService:
             self.state.replace_future_1m_candles([], error=str(error))
         finally:
             self.future_1m_lock.release()
+
+    def _target_after_hours(self) -> bool:
+        return is_after_hours_now() if self.auto_after_hours else self.after_hours
+
+    def _should_hold_night_snapshot(self) -> bool:
+        return self.auto_after_hours and is_night_preopen_now()
+
+    def _night_preopen_snapshot(self) -> dict[str, Any] | None:
+        cached = self.snapshot_store.read_latest(force_stale=True, error=NIGHT_PREOPEN_CACHE_MESSAGE)
+        if cached and cached.get("session") == "night" and snapshot_has_usable_quotes(cached):
+            return cached
+        if not self.started:
+            return None
+        legacy = self.state.snapshot()
+        if not legacy.get("after_hours"):
+            return None
+        snapshot = quote_snapshot_from_tquote_payload(
+            legacy,
+            source_type="fugle_live",
+            stale=True,
+            error=NIGHT_PREOPEN_CACHE_MESSAGE,
+        )
+        return snapshot if snapshot_has_usable_quotes(snapshot) else None
+
+    def _refresh_session_if_needed(self) -> None:
+        if not self.auto_after_hours or not self.token:
+            return
+        target_after_hours = self._target_after_hours()
+        if target_after_hours == self.after_hours and not self.session_prepare_failed:
+            return
+        self._prepare_state_for_session(target_after_hours, status="prepared")
+
+    def _prepare_state_for_session(self, after_hours: bool, status: str) -> bool:
+        self.after_hours = after_hours
+        try:
+            universe = prepare_universe(self.token, self.contract, self.strike_count, after_hours)
+        except Exception as error:  # noqa: BLE001 - keep dashboard server available.
+            self.state.update(
+                after_hours=after_hours,
+                status="error",
+                authenticated=False,
+                subscribed=False,
+                books={},
+                aggregates={},
+                vix_series=[],
+                error=str(error),
+            )
+            self.force_next_rest_probe = True
+            self.session_prepare_failed = True
+            return False
+
+        self.after_hours = after_hours
+        self.session_prepare_failed = False
+        self.state.update(
+            **universe,
+            after_hours=after_hours,
+            status=status,
+            authenticated=False,
+            subscribed=False,
+            books={},
+            aggregates={},
+            event_counts={},
+            vix_series=[],
+            last_event_at="",
+            last_book_at="",
+            last_aggregate_at="",
+            last_vix_sample_monotonic=0,
+            error="",
+        )
+        self.last_rest_probe_monotonic = 0.0
+        self.force_next_rest_probe = True
+        return True
 
 
 def now_text() -> str:
@@ -398,9 +481,14 @@ def front_month_contract() -> str:
     return DEFAULT_CONTRACT
 
 
-def is_after_hours_now() -> bool:
-    now = datetime.now().time()
-    return now >= datetime_time(hour=14, minute=45) or now < datetime_time(hour=6, minute=0)
+def is_after_hours_now(now: datetime | None = None) -> bool:
+    current = (now or taipei_now()).astimezone(TAIPEI_TZ).time()
+    return current >= datetime_time(hour=14, minute=45) or current < REGULAR_SESSION_START
+
+
+def is_night_preopen_now(now: datetime | None = None) -> bool:
+    current = (now or taipei_now()).astimezone(TAIPEI_TZ).time()
+    return NIGHT_SESSION_END <= current < REGULAR_SESSION_START
 
 
 def unique_bool_order(first: bool) -> list[bool]:
@@ -982,15 +1070,20 @@ async def fugle_books_loop(token: str, state: DemoState) -> None:
             async with websockets.connect(WS_URL, ping_interval=None, close_timeout=3) as websocket:
                 await websocket.send(json.dumps({"event": "auth", "data": {"apikey": token}}))
                 state.update(status="authenticating", authenticated=False, subscribed=False)
+                subscribed_after_hours: bool | None = None
 
                 async for raw in websocket:
                     message = json.loads(raw)
                     event = message.get("event", "")
                     state.increment(event)
+                    if subscribed_after_hours is not None and state.snapshot().get("after_hours") != subscribed_after_hours:
+                        state.update(status="reconnecting", authenticated=False, subscribed=False, error="")
+                        break
 
                     if event == "authenticated":
                         state.update(status="authenticated", authenticated=True)
                         snapshot = state.snapshot()
+                        subscribed_after_hours = snapshot["after_hours"]
                         await websocket.send(json.dumps({
                             "event": "subscribe",
                             "data": {

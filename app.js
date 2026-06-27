@@ -7,6 +7,7 @@ const T_QUOTE_STRIKE_RANGE = 5000;
 const SAMPLE_MONTHLY_STRIKE_STEP = 100;
 const QUOTE_POLL_MS = 5000;
 const INDEX_TRAILING_WHITESPACE_DAYS = 4;
+const INDEX_DEFAULT_EXPIRY_LOOKBACK = 15;
 const INDEX_BAR_SPACING = 8;
 const TAIPEI_TIME_ZONE = "Asia/Taipei";
 const FUTURES_1M_TICK_MINUTES = 15;
@@ -116,8 +117,10 @@ document.addEventListener("DOMContentLoaded", () => {
   seedMarketData();
   bindEvents();
   renderAll({ indexChart: true });
-  loadSettlementDates().then(() => renderAll({ indexChart: true }));
-  fetchIndexCandles({ auto: true });
+  loadSettlementDates().then(() => {
+    renderAll({ indexChart: true });
+    fetchIndexCandles({ auto: true });
+  });
   fetchRealtimeQuotes({ auto: true });
   connectFugleTQuote();
   connectFutures1m();
@@ -151,6 +154,7 @@ function bindElements() {
     payoffStats: document.querySelector("#payoffStats"),
     startDateInput: document.querySelector("#startDateInput"),
     endDateInput: document.querySelector("#endDateInput"),
+    indexRangeLabel: document.querySelector("#indexRangeLabel"),
     fetchIndexBtn: document.querySelector("#fetchIndexBtn"),
     indexChart: document.querySelector("#indexChart"),
     priceChart: document.querySelector("#priceChart"),
@@ -220,6 +224,16 @@ function bindEvents() {
     });
   });
   els.fetchIndexBtn.addEventListener("click", fetchIndexCandles);
+  els.startDateInput?.addEventListener("change", () => {
+    ensureIndexDateOrder("start");
+    updateIndexCycleLabel();
+    fetchIndexCandles();
+  });
+  els.endDateInput?.addEventListener("change", () => {
+    ensureIndexDateOrder("end");
+    updateIndexCycleLabel();
+    fetchIndexCandles();
+  });
   els.fetchOptionsBtn?.addEventListener("click", fetchRealtimeQuotes);
   els.futures1mRealtimeBtn?.addEventListener("click", scrollFutures1mToRealtime);
   els.positionsBody.addEventListener("click", handlePositionAction);
@@ -278,88 +292,41 @@ function switchAutomationTab(tab) {
 function setDefaultDates() {
   const today = new Date();
   const end = toDateInput(today);
-  const start = autoIndexStartDateForChart(defaultIndexStartDate(today), end);
-  const nextExpiry = thirdWednesday(today.getFullYear(), today.getMonth());
-  const expiry = nextExpiry < stripTime(today)
+  const currentMonthExpiry = thirdWednesday(today.getFullYear(), today.getMonth());
+  const expiry = currentMonthExpiry < stripTime(today)
     ? thirdWednesday(today.getFullYear(), today.getMonth() + 1)
-    : nextExpiry;
+    : currentMonthExpiry;
 
-  els.startDateInput.value = start;
-  els.endDateInput.value = end;
+  setDefaultIndexDateRange(today);
   if (els.optionDateInput) els.optionDateInput.value = end;
   els.positionForm.elements.expiry.value = toDateInput(expiry);
 }
 
-function defaultIndexStartDate(today) {
-  return lastSettlementDateOfYear(2025) || toDateInput(addDays(today, -120));
+function nextIndexSettlementDate(today) {
+  const todayText = toDateInput(today);
+  return settlementDates().find((date) => date >= todayText) || settlementDates().at(-1) || "";
 }
 
-function lastSettlementDateOfYear(year) {
-  const prefix = `${year}-`;
-  return settlementDates()
-    .filter((date) => date.startsWith(prefix))
-    .sort()
-    .at(-1);
+function defaultIndexDateRange(today = new Date()) {
+  const dates = settlementDates();
+  const endDate = nextIndexSettlementDate(today);
+  const endIndex = dates.indexOf(endDate);
+  const startIndex = endIndex >= 0 ? Math.max(0, endIndex - INDEX_DEFAULT_EXPIRY_LOOKBACK) : 0;
+  const parsedEnd = parseDate(endDate);
+  const fallbackStart = parsedEnd
+    ? toDateInput(addDays(parsedEnd, -INDEX_DEFAULT_EXPIRY_LOOKBACK * 35))
+    : endDate;
+  return {
+    startDate: dates[startIndex] || fallbackStart || endDate,
+    endDate,
+  };
 }
 
-function autoIndexStartDateForChart(startDate, endDate) {
-  if (!startDate || !endDate) return startDate;
-  const selectedTradingDays = tradingDayCountBetween(startDate, endDate);
-  const requiredTradingDays = requiredIndexTradingDays();
-  if (selectedTradingDays + INDEX_TRAILING_WHITESPACE_DAYS >= requiredTradingDays) {
-    return startDate;
-  }
-  const end = parseDate(endDate);
-  if (!end) return startDate;
-  const targetStart = toDateInput(subtractTradingDays(end, requiredTradingDays - INDEX_TRAILING_WHITESPACE_DAYS - 1));
-  return nearestSettlementStartDate(targetStart, endDate, requiredTradingDays) || startDate;
-}
-
-function requiredIndexTradingDays() {
-  const chartWidth = indexChartWidthForDateRange();
-  return Math.max(120, Math.ceil(chartWidth / INDEX_BAR_SPACING));
-}
-
-function indexChartWidthForDateRange() {
-  const width = els.priceChart?.clientWidth || els.indexChart?.clientWidth || 0;
-  if (width > 0) return width;
-  const rect = els.priceChart?.getBoundingClientRect?.();
-  return Math.max(960, Math.floor(rect?.width || 0));
-}
-
-function nearestSettlementStartDate(targetStart, endDate, requiredTradingDays) {
-  const candidates = settlementDates()
-    .filter((date) => date <= endDate)
-    .sort((a, b) => Math.abs(dateDistanceDays(a, targetStart)) - Math.abs(dateDistanceDays(b, targetStart)) || String(a).localeCompare(String(b)));
-  const enough = candidates.find((date) => tradingDayCountBetween(date, endDate) + INDEX_TRAILING_WHITESPACE_DAYS >= requiredTradingDays);
-  return enough || candidates[0] || "";
-}
-
-function tradingDayCountBetween(startDate, endDate) {
-  return weekdayDatesBetween(startDate, endDate)
-    .filter((date) => !KNOWN_TWSE_CLOSED_DATES.has(date))
-    .length;
-}
-
-function subtractTradingDays(date, count) {
-  const cursor = stripTime(date);
-  let remaining = Math.max(0, count);
-  while (remaining > 0) {
-    cursor.setDate(cursor.getDate() - 1);
-    const text = toDateInput(cursor);
-    const day = cursor.getDay();
-    if (day !== 0 && day !== 6 && !KNOWN_TWSE_CLOSED_DATES.has(text)) {
-      remaining -= 1;
-    }
-  }
-  return cursor;
-}
-
-function dateDistanceDays(a, b) {
-  const dateA = parseDate(a);
-  const dateB = parseDate(b);
-  if (!dateA || !dateB) return Number.MAX_SAFE_INTEGER;
-  return Math.abs(calendarDaysBetween(dateA, dateB));
+function setDefaultIndexDateRange(today = new Date()) {
+  const { startDate, endDate } = defaultIndexDateRange(today);
+  if (els.startDateInput) els.startDateInput.value = startDate;
+  if (els.endDateInput) els.endDateInput.value = endDate;
+  updateIndexCycleLabel();
 }
 
 async function loadSettlementDates() {
@@ -378,10 +345,43 @@ async function loadSettlementDates() {
   } catch (error) {
     state.settlementDates = [...FALLBACK_SETTLEMENT_DATES];
   }
+  setDefaultIndexDateRange();
 }
 
 function settlementDates() {
   return state.settlementDates.length ? state.settlementDates : FALLBACK_SETTLEMENT_DATES;
+}
+
+function ensureIndexDateOrder(changedSide = "end") {
+  const startInput = els.startDateInput;
+  const endInput = els.endDateInput;
+  if (!startInput || !endInput || !startInput.value || !endInput.value) return;
+  if (startInput.value <= endInput.value) return;
+  if (changedSide === "start") {
+    endInput.value = startInput.value;
+  } else {
+    startInput.value = endInput.value;
+  }
+}
+
+function selectedIndexCycleDateRange() {
+  const defaults = defaultIndexDateRange(new Date());
+  const range = {
+    startDate: normalizeDateValue(els.startDateInput?.value) || defaults.startDate,
+    endDate: normalizeDateValue(els.endDateInput?.value) || defaults.endDate,
+  };
+  const todayText = toDateInput(new Date());
+  const queryEndDate = range.endDate && range.endDate > todayText ? todayText : range.endDate;
+  return { ...range, queryEndDate };
+}
+
+function updateIndexCycleLabel() {
+  if (!els.indexRangeLabel) return;
+  const { startDate, endDate, queryEndDate } = selectedIndexCycleDateRange();
+  const liveText = queryEndDate && queryEndDate < endDate ? `，資料更新至 ${queryEndDate}` : "";
+  els.indexRangeLabel.textContent = startDate && endDate
+    ? `顯示區間 ${startDate} ~ ${endDate}${liveText}`
+    : "";
 }
 
 function loadPositions() {
@@ -1276,8 +1276,7 @@ function trailingTradingWhitespaceDates(candles, count) {
 }
 
 function settlementMarkerDates() {
-  const startDate = els.startDateInput?.value || "";
-  const endDate = els.endDateInput?.value || "";
+  const { startDate, endDate } = selectedIndexCycleDateRange();
   return settlementDates()
     .filter((date) => date >= startDate)
     .filter((date) => !endDate || date <= endDate)
@@ -2356,24 +2355,25 @@ function renderRiskAndAdvice() {
 
 async function fetchIndexCandles(options = {}) {
   if (state.isFetchingIndex) return;
-  const endDate = els.endDateInput.value;
-  const startDate = autoIndexStartDateForChart(els.startDateInput.value, endDate);
-  if (startDate && startDate !== els.startDateInput.value) {
-    els.startDateInput.value = startDate;
+  const { startDate, endDate, queryEndDate } = selectedIndexCycleDateRange();
+  updateIndexCycleLabel();
+  if (!startDate || !endDate || !queryEndDate) return;
+  if (queryEndDate < startDate) {
+    els.marketStatus.textContent = `選定區間 ${startDate} ~ ${endDate} 尚未開始，暫無可抓取日線。`;
+    return;
   }
-  if (!startDate || !endDate) return;
   state.isFetchingIndex = true;
   els.fetchIndexBtn.disabled = true;
   try {
-    els.marketStatus.textContent = "正在透過本機 FinMind token 讀取加權指數日線...";
+    els.marketStatus.textContent = `正在透過本機 FinMind token 讀取選定區間 ${startDate} ~ ${endDate} 的加權指數日線...`;
     let sourceLabel = "本機 FinMind token";
     let latestRows = [];
     let latestFetchError = "";
     let tradingDates = [];
     let historicalCandles = [];
     try {
-      const localPayload = await localIndexCandleData(startDate, endDate);
-      tradingDates = normalizeTradingDateRows(localPayload.trading_dates || [], startDate, endDate);
+      const localPayload = await localIndexCandleData(startDate, queryEndDate);
+      tradingDates = normalizeTradingDateRows(localPayload.trading_dates || [], startDate, queryEndDate);
       historicalCandles = normalizeDailyCandles(localPayload.daily_candles || []);
       latestRows = Array.isArray(localPayload.latest_rows) ? localPayload.latest_rows : [];
       latestFetchError = localPayload.latest_error || "";
@@ -2381,14 +2381,14 @@ async function fetchIndexCandles(options = {}) {
       sourceLabel = "FinMind";
       latestFetchError = localError.message || String(localError);
       els.marketStatus.textContent = "本機日線 API 無法使用，改用 FinMind 直接端點讀取交易日曆...";
-      tradingDates = await fetchTradingDates(startDate, endDate);
+      tradingDates = await fetchTradingDates(startDate, queryEndDate);
       els.marketStatus.textContent = "正在使用加權指數日資料端點抓取歷史 OHLC...";
-      historicalCandles = await fetchTaiexDailyCandles(startDate, endDate);
+      historicalCandles = await fetchTaiexDailyCandles(startDate, queryEndDate);
     }
 
     if (!tradingDates.length && historicalCandles.length) {
       tradingDates = unique(historicalCandles.map((candle) => candle.time))
-        .filter((date) => date >= startDate && date <= endDate)
+        .filter((date) => date >= startDate && date <= queryEndDate)
         .sort();
     }
     if (!tradingDates.length) throw new Error("指定區間沒有交易日。");
@@ -2433,7 +2433,8 @@ async function fetchIndexCandles(options = {}) {
       ? `，最新交易日 ${latestTradingDate} 已用五秒資料重建`
       : `，最新交易日 ${latestTradingDate} 沒有可用五秒資料，保留日資料`;
     const latestWarning = !latestCandle && latestFetchError ? `；五秒資料警告：${latestFetchError}` : "";
-    els.marketStatus.textContent = `已更新 ${candles.length} 根加權指數日線（${sourceLabel}）${droppedText}${latestText}${latestWarning}。`;
+    const cycleText = queryEndDate < endDate ? `，結束日期 ${endDate} 尚未到，資料目前更新至 ${queryEndDate}` : "";
+    els.marketStatus.textContent = `已更新 ${candles.length} 根加權指數日線（${sourceLabel}，${startDate} ~ ${endDate}）${cycleText}${droppedText}${latestText}${latestWarning}。`;
     renderAll({ indexChart: true });
   } catch (error) {
     const fallbackText = options.auto ? "，目前保留示範日線" : "";
@@ -2663,8 +2664,7 @@ function patchLatestIndexCandleFromQuote(indexQuote) {
   const quoteDate = latestIndexCandleDateFromQuote(indexQuote);
   if (!quoteDate) return false;
 
-  const startDate = normalizeDateValue(els.startDateInput?.value);
-  const endDate = normalizeDateValue(els.endDateInput?.value);
+  const { startDate, endDate } = selectedIndexCycleDateRange();
   if ((startDate && quoteDate < startDate) || (endDate && quoteDate > endDate)) return false;
 
   const candles = [...state.indexCandles];
