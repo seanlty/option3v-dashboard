@@ -63,6 +63,8 @@ const state = {
   futures1mSeries: null,
   futures1mEventSource: null,
   futures1mDataKey: "",
+  futures1mSessionKey: "",
+  lastFutures1mVisibleLogicalRange: null,
   futures1mResizeFrame: null,
   futures1mAxisFrame: null,
   fugleTQuote: null,
@@ -189,6 +191,7 @@ function bindElements() {
     futures1mStatus: document.querySelector("#futures1mStatus"),
     futures1mTitle: document.querySelector("#futures1mTitle"),
     futures1mMeta: document.querySelector("#futures1mMeta"),
+    futures1mRealtimeBtn: document.querySelector("#futures1mRealtimeBtn"),
   });
 }
 
@@ -218,6 +221,7 @@ function bindEvents() {
   });
   els.fetchIndexBtn.addEventListener("click", fetchIndexCandles);
   els.fetchOptionsBtn?.addEventListener("click", fetchRealtimeQuotes);
+  els.futures1mRealtimeBtn?.addEventListener("click", scrollFutures1mToRealtime);
   els.positionsBody.addEventListener("click", handlePositionAction);
   els.optionChainBody?.addEventListener("click", handleChainAction);
   els.tQuoteBody.addEventListener("click", handleChainAction);
@@ -1499,6 +1503,13 @@ function renderFutures1mChart() {
         })
       : state.futures1mChart.addCandlestickSeries();
     const timeScale = state.futures1mChart.timeScale();
+    if (timeScale.subscribeVisibleLogicalRangeChange) {
+      timeScale.subscribeVisibleLogicalRangeChange((range) => {
+        const cloned = cloneLogicalRange(range);
+        if (cloned) state.lastFutures1mVisibleLogicalRange = cloned;
+        scheduleFutures1mTimeAxis();
+      });
+    }
     if (timeScale.subscribeVisibleTimeRangeChange) {
       timeScale.subscribeVisibleTimeRangeChange(scheduleFutures1mTimeAxis);
     }
@@ -1506,10 +1517,24 @@ function renderFutures1mChart() {
   state.futures1mChart.applyOptions(size);
   const candles = state.futures1m?.candles || [];
   const key = futures1mDataKey(candles);
+  const sessionKey = futures1mSessionKey(state.futures1m);
+  const sessionChanged = state.futures1mSessionKey !== sessionKey;
+  const hadPreviousCandles = Boolean(state.futures1mDataKey && state.futures1mDataKey !== futures1mDataKey([]));
   if (state.futures1mDataKey !== key) {
+    const preserveRange = sessionChanged
+      ? null
+      : currentFutures1mVisibleLogicalRange() || state.lastFutures1mVisibleLogicalRange;
+    const followRealtime = !sessionChanged && hadPreviousCandles && futures1mIsAtRealtimeEdge();
     state.futures1mDataKey = key;
+    state.futures1mSessionKey = sessionKey;
     state.futures1mSeries.setData(candles);
-    state.futures1mChart.timeScale().fitContent();
+    if (candles.length && (!hadPreviousCandles || sessionChanged)) {
+      state.futures1mChart.timeScale().fitContent();
+    } else if (followRealtime) {
+      state.futures1mChart.timeScale().scrollToRealTime?.();
+    } else {
+      restoreFutures1mVisibleLogicalRange(preserveRange);
+    }
   }
   scheduleFutures1mTimeAxis();
 }
@@ -1527,6 +1552,47 @@ function futures1mDataKey(candles) {
   const first = candles[0];
   const last = candles.at(-1);
   return `${first?.time || ""}:${last?.time || ""}:${last?.close || ""}:${candles.length}`;
+}
+
+function futures1mSessionKey(payload) {
+  if (!payload) return "";
+  return [
+    payload.symbol || "",
+    payload.contract || "",
+    payload.sessionDate || "",
+    payload.sessionStart || "",
+    payload.sessionEnd || "",
+  ].join(":");
+}
+
+function currentFutures1mVisibleLogicalRange() {
+  return cloneLogicalRange(state.futures1mChart?.timeScale?.().getVisibleLogicalRange?.() || null);
+}
+
+function futures1mIsAtRealtimeEdge() {
+  const position = state.futures1mChart?.timeScale?.().scrollPosition?.();
+  return Number.isFinite(position) && Math.abs(position) < 0.5;
+}
+
+function restoreFutures1mVisibleLogicalRange(range) {
+  const target = cloneLogicalRange(range);
+  if (!target || !state.futures1mChart) return;
+  requestAnimationFrame(() => {
+    state.futures1mChart?.timeScale().setVisibleLogicalRange(target);
+    state.lastFutures1mVisibleLogicalRange = target;
+    scheduleFutures1mTimeAxis();
+  });
+}
+
+function scrollFutures1mToRealtime() {
+  if (!state.futures1mChart) renderFutures1mChart();
+  const timeScale = state.futures1mChart?.timeScale?.();
+  if (timeScale?.scrollToRealTime) {
+    timeScale.scrollToRealTime();
+  } else {
+    timeScale?.fitContent?.();
+  }
+  scheduleFutures1mTimeAxis();
 }
 
 function ensureFutures1mTimeAxis() {
@@ -1579,8 +1645,10 @@ function scheduleFutures1mChartResize() {
   state.futures1mResizeFrame = requestAnimationFrame(() => {
     state.futures1mResizeFrame = null;
     if (state.futures1mChart && els.futures1mChart) {
+      const preserveRange = currentFutures1mVisibleLogicalRange() || state.lastFutures1mVisibleLogicalRange;
       state.futures1mChart.applyOptions(chartElementSize(els.futures1mChart));
-      scheduleFutures1mTimeAxis();
+      restoreFutures1mVisibleLogicalRange(preserveRange);
+      if (!preserveRange) scheduleFutures1mTimeAxis();
     }
   });
 }
@@ -2469,9 +2537,14 @@ async function fetchRealtimeQuotes(options = {}) {
     const indexRangeBeforeQuoteRender = currentIndexVisibleLogicalRange() || state.lastIndexVisibleLogicalRange;
     state.futuresQuote = futuresQuote;
     state.futuresQuotes = futuresRows;
+    const indexLivePatched = indexQuote ? patchLatestIndexCandleFromQuote(indexQuote) : false;
     if (indexQuote) {
       state.indexQuote = indexQuote;
       setSpot(indexQuote.close, `FinMind 加權指數 snapshot${indexQuote.date ? ` ${indexQuote.date}` : ""}`);
+      if (indexLivePatched && els.marketStatus) {
+        const quoteDate = latestIndexCandleDateFromQuote(indexQuote);
+        els.marketStatus.textContent = `已用即時加權指數 snapshot 更新 ${quoteDate} 日K，close ${formatNumber(indexQuote.close, 0)}。`;
+      }
     }
     state.optionChain = filtered;
     syncPositionMarketPrices();
@@ -2482,7 +2555,7 @@ async function fetchRealtimeQuotes(options = {}) {
     if (els.optionStatus) {
       els.optionStatus.textContent = `已讀取 ${filtered.length} 筆 TXO snapshot；近月台指期 ${futuresQuote.futures_id} ${formatNumber(futuresQuote.close, 0)}${indexText}${latestTime ? `，行情 ${latestTime}` : ""}${cacheTime}${warningText}。`;
     }
-    renderAll();
+    renderAll({ indexChart: indexLivePatched });
     stabilizeIndexVisibleLogicalRange(indexRangeBeforeQuoteRender, 12);
     resumeIndexChartResizeObserver(indexResizeObserverPaused);
     indexResizeObserverPaused = false;
@@ -2582,6 +2655,49 @@ function aggregateTaiexRows(rows, date) {
     close: values[values.length - 1].value,
   };
   return isValidOhlc(candle.open, candle.high, candle.low, candle.close) ? candle : null;
+}
+
+function patchLatestIndexCandleFromQuote(indexQuote) {
+  const close = number(indexQuote?.close, NaN);
+  if (!Number.isFinite(close) || close <= 0) return false;
+  const quoteDate = latestIndexCandleDateFromQuote(indexQuote);
+  if (!quoteDate) return false;
+
+  const startDate = normalizeDateValue(els.startDateInput?.value);
+  const endDate = normalizeDateValue(els.endDateInput?.value);
+  if ((startDate && quoteDate < startDate) || (endDate && quoteDate > endDate)) return false;
+
+  const candles = [...state.indexCandles];
+  const existingIndex = candles.findIndex((candle) => candle.time === quoteDate);
+  if (existingIndex >= 0) {
+    const current = candles[existingIndex];
+    const next = {
+      ...current,
+      high: Math.max(current.high, close),
+      low: Math.min(current.low, close),
+      close,
+    };
+    if (!isValidOhlc(next.open, next.high, next.low, next.close)) return false;
+    if (
+      current.open === next.open
+      && current.high === next.high
+      && current.low === next.low
+      && current.close === next.close
+    ) {
+      return false;
+    }
+    candles[existingIndex] = next;
+  } else {
+    const last = candles.at(-1);
+    if (last && quoteDate < last.time) return false;
+    candles.push({ time: quoteDate, open: close, high: close, low: close, close });
+  }
+  state.indexCandles = candles.sort((a, b) => a.time.localeCompare(b.time));
+  return true;
+}
+
+function latestIndexCandleDateFromQuote(indexQuote) {
+  return normalizeDateValue(indexQuote?.date) || state.indexCandles.at(-1)?.time || "";
 }
 
 function normalizeTaiexIndicatorTimestamp(row) {

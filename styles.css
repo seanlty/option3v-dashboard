@@ -818,6 +818,7 @@ tbody tr:last-child td {
 .futures-chart-header {
   align-items: center;
   display: flex;
+  flex-wrap: wrap;
   gap: 12px;
   justify-content: space-between;
   margin: 0 0 8px;
@@ -834,6 +835,19 @@ tbody tr:last-child td {
   display: block;
   font-size: 12px;
   margin-top: 3px;
+}
+
+.futures-chart-actions {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+}
+
+.futures-realtime-action {
+  border-color: var(--line);
+  font-size: 12px;
+  min-height: 30px;
+  padding: 5px 10px;
 }
 
 .futures-time-axis {
