@@ -51,6 +51,71 @@ def test_main_runs(capsys):
     assert "quant-assistant project is ready." in captured.out
 
 
+def test_normalize_fugle_taiex_row_maps_snapshot_ohlc():
+    row = {
+        "symbol": "IX0001",
+        "name": "發行量加權股價指數",
+        "openPrice": 23000,
+        "highPrice": 23250,
+        "lowPrice": 22950,
+        "closePrice": 23120,
+    }
+
+    candle = main_module.normalize_fugle_taiex_row(row, "2026-06-30")
+
+    assert candle == {
+        "stock_id": "TAIEX",
+        "symbol": "IX0001",
+        "name": "發行量加權股價指數",
+        "date": "2026-06-30",
+        "open": 23000.0,
+        "high": 23250.0,
+        "low": 22950.0,
+        "close": 23120.0,
+        "source": "fugle_stock_snapshot",
+    }
+
+
+def test_quote_cache_index_candles_use_fugle_latest_candle(monkeypatch):
+    cache = main_module.QuoteCache("finmind-token", fugle_token="fugle-token")
+    datasets = []
+
+    def fake_fetch_data(dataset, params):
+        datasets.append(dataset)
+        if dataset == "TaiwanStockTradingDate":
+            return [{"date": "2026-06-30"}]
+        if dataset == "TaiwanStockPrice":
+            return [{
+                "date": "2026-06-30",
+                "open": 23000,
+                "max": 23100,
+                "min": 22900,
+                "close": 23050,
+            }]
+        raise AssertionError(f"unexpected dataset {dataset}")
+
+    monkeypatch.setattr(cache, "_fetch_data", fake_fetch_data)
+    monkeypatch.setattr(
+        cache,
+        "_fetch_fugle_taiex_candle",
+        lambda trading_date: {
+            "stock_id": "TAIEX",
+            "date": trading_date,
+            "open": 23010,
+            "high": 23200,
+            "low": 22980,
+            "close": 23150,
+            "source": "fugle_stock_snapshot",
+        },
+    )
+
+    payload = cache.fetch_index_candles("2026-06-30", "2026-06-30")
+
+    assert payload["latest_candle"]["close"] == 23150
+    assert payload["latest_source"] == "fugle_stock_snapshot"
+    assert "TaiwanVariousIndicators5Seconds" not in datasets
+
+
 def test_fugle_service_auto_switches_to_afterhours(monkeypatch):
     calls = []
 
@@ -106,6 +171,93 @@ def test_fugle_service_fixed_regular_session_does_not_auto_switch(monkeypatch):
     service._refresh_session_if_needed()
 
     assert service.after_hours is False
+
+
+def test_demo_state_snapshot_records_vix_series(monkeypatch):
+    monkeypatch.setattr(fugle_live.time, "monotonic", lambda: 10.0)
+    state = fugle_live.DemoState(
+        status="live",
+        contract="202607",
+        settlement_date="2026-07-15",
+        future_symbol="TXFG6",
+        future_price=23000,
+        selected_strikes=[23000],
+        symbol_meta={
+            "TXO23000G6": {"symbol": "TXO23000G6", "strike": 23000, "side": "call"},
+            "TXO23000S6": {"symbol": "TXO23000S6", "strike": 23000, "side": "put"},
+        },
+        books={
+            "TXO23000G6": {"bids": [{"price": 120, "size": 1}], "asks": [{"price": 130, "size": 1}]},
+            "TXO23000S6": {"bids": [{"price": 110, "size": 1}], "asks": [{"price": 120, "size": 1}]},
+        },
+        aggregates={},
+    )
+
+    snapshot = state.snapshot()
+
+    assert snapshot["vix"] is not None
+    assert len(snapshot["vix_series"]) == 1
+
+
+def test_rest_vix_samples_accumulate_series(monkeypatch):
+    ticks = iter([10.0, 12.0])
+    monkeypatch.setattr(fugle_live.time, "monotonic", lambda: next(ticks))
+    service = fugle_live.FugleLiveTQuoteService("token", contract="202607")
+
+    first = {
+        "vix": {"value": 21.5, "sample_count": 8, "call_count": 4, "put_count": 4},
+        "last_aggregate_at": "2026-06-30T09:01:00+08:00",
+    }
+    second = {
+        "vix": {"value": 22.0, "sample_count": 8, "call_count": 4, "put_count": 4},
+        "last_aggregate_at": "2026-06-30T09:01:05+08:00",
+    }
+
+    service._record_rest_vix_sample(first)
+    service._record_rest_vix_sample(second)
+
+    assert [point["value"] for point in second["vix_series"]] == [21.5, 22.0]
+
+
+def test_live_snapshot_uses_rest_vix_when_live_has_no_mid_iv(monkeypatch):
+    service = fugle_live.FugleLiveTQuoteService("token", contract="202607")
+    service.started = True
+    live_payload = {
+        "status": "live",
+        "after_hours": False,
+        "contract": "202607",
+        "settlement_date": "2026-07-15",
+        "future_symbol": "TXFG6",
+        "future_price": 23000,
+        "risk_free_rate": 0.015,
+        "rows": [{
+            "strike": 23000,
+            "call": {"symbol": "TXO23000G6", "last": 100},
+            "put": {"symbol": "TXO23000S6", "last": 95},
+        }],
+    }
+    rest_snapshot = fugle_live.quote_snapshot_from_tquote_payload(
+        {
+            **live_payload,
+            "last_aggregate_at": "2026-06-30T09:01:00+08:00",
+            "vix": {"value": 23.5, "sample_count": 8, "call_count": 4, "put_count": 4},
+            "vix_series": [
+                {"time": "2026-06-30T09:00:55+08:00", "value": 23.1},
+                {"time": "2026-06-30T09:01:00+08:00", "value": 23.5},
+            ],
+        },
+        source_type="fugle_rest_probe",
+    )
+
+    monkeypatch.setattr(service, "snapshot", lambda: live_payload)
+    monkeypatch.setattr(service, "_rest_quote_snapshot_if_due", lambda force=False: rest_snapshot)
+
+    snapshot = service.quote_snapshot()
+
+    assert snapshot["source"]["type"] == "fugle_live"
+    assert snapshot["vix"]["value_percent"] == 23.5
+    assert len(snapshot["vix_series"]) == 2
+    assert snapshot["metadata"]["vix_source"] == "fugle_rest_probe"
 
 
 def test_fugle_service_preopen_returns_last_night_snapshot(monkeypatch):

@@ -2368,6 +2368,8 @@ async function fetchIndexCandles(options = {}) {
     els.marketStatus.textContent = `正在透過本機 FinMind token 讀取選定區間 ${startDate} ~ ${endDate} 的加權指數日線...`;
     let sourceLabel = "本機 FinMind token";
     let latestRows = [];
+    let latestCandle = null;
+    let latestSource = "";
     let latestFetchError = "";
     let tradingDates = [];
     let historicalCandles = [];
@@ -2376,6 +2378,8 @@ async function fetchIndexCandles(options = {}) {
       tradingDates = normalizeTradingDateRows(localPayload.trading_dates || [], startDate, queryEndDate);
       historicalCandles = normalizeDailyCandles(localPayload.daily_candles || []);
       latestRows = Array.isArray(localPayload.latest_rows) ? localPayload.latest_rows : [];
+      latestCandle = normalizeDailyCandle(localPayload.latest_candle || {});
+      latestSource = localPayload.latest_source || "";
       latestFetchError = localPayload.latest_error || "";
     } catch (localError) {
       sourceLabel = "FinMind";
@@ -2401,7 +2405,7 @@ async function fetchIndexCandles(options = {}) {
     );
 
     const latestTradingDate = tradingDates[tradingDates.length - 1];
-    if (!latestRows.length) {
+    if (!latestCandle && !latestRows.length && sourceLabel === "FinMind") {
       els.marketStatus.textContent = `正在用五秒資料 resample 最新交易日 ${latestTradingDate}...`;
       try {
         latestRows = await finmindData("TaiwanVariousIndicators5Seconds", { start_date: latestTradingDate });
@@ -2410,7 +2414,7 @@ async function fetchIndexCandles(options = {}) {
         latestFetchError = error.message || String(error);
       }
     }
-    const latestCandle = aggregateTaiexRows(latestRows, latestTradingDate);
+    if (!latestCandle) latestCandle = aggregateTaiexRows(latestRows, latestTradingDate);
     if (latestCandle && tradingDateSet.has(latestCandle.time)) {
       candlesByDate.set(latestCandle.time, latestCandle);
     }
@@ -2424,15 +2428,16 @@ async function fetchIndexCandles(options = {}) {
     if (!candles.length) throw new Error("查無 TAIEX 資料，可能是假日、權限或請求額度限制。");
     state.indexCandles = candles;
     const lastCandle = candles[candles.length - 1];
+    const latestSourceText = latestSource === "fugle_stock_snapshot" ? "Fugle 加權指數 snapshot" : `${sourceLabel} 加權指數五秒重建`;
     const spotSource = latestCandle && lastCandle.time === latestCandle.time
-      ? `${sourceLabel} 加權指數五秒重建 ${latestCandle.time}`
+      ? `${latestSourceText} ${latestCandle.time}`
       : `${sourceLabel} 加權指數收盤價 ${lastCandle.time}`;
     setSpot(lastCandle.close, spotSource);
     const droppedText = droppedCount > 0 ? `，已略過 ${droppedCount} 個無日資料交易日` : "";
     const latestText = latestCandle
-      ? `，最新交易日 ${latestTradingDate} 已用五秒資料重建`
-      : `，最新交易日 ${latestTradingDate} 沒有可用五秒資料，保留日資料`;
-    const latestWarning = !latestCandle && latestFetchError ? `；五秒資料警告：${latestFetchError}` : "";
+      ? `，最新交易日 ${latestTradingDate} 已用${latestSource === "fugle_stock_snapshot" ? " Fugle snapshot" : "五秒資料"}更新`
+      : `，最新交易日 ${latestTradingDate} 沒有可用即時 OHLC，保留日資料`;
+    const latestWarning = !latestCandle && latestFetchError ? `；即時 OHLC 警告：${latestFetchError}` : "";
     const cycleText = queryEndDate < endDate ? `，結束日期 ${endDate} 尚未到，資料目前更新至 ${queryEndDate}` : "";
     els.marketStatus.textContent = `已更新 ${candles.length} 根加權指數日線（${sourceLabel}，${startDate} ~ ${endDate}）${cycleText}${droppedText}${latestText}${latestWarning}。`;
     renderAll({ indexChart: true });
@@ -2541,7 +2546,8 @@ async function fetchRealtimeQuotes(options = {}) {
     const indexLivePatched = indexQuote ? patchLatestIndexCandleFromQuote(indexQuote) : false;
     if (indexQuote) {
       state.indexQuote = indexQuote;
-      setSpot(indexQuote.close, `FinMind 加權指數 snapshot${indexQuote.date ? ` ${indexQuote.date}` : ""}`);
+      const indexSource = indexQuote.source === "fugle_stock_snapshot" ? "Fugle" : "FinMind";
+      setSpot(indexQuote.close, `${indexSource} 加權指數 snapshot${indexQuote.date ? ` ${indexQuote.date}` : ""}`);
       if (indexLivePatched && els.marketStatus) {
         const quoteDate = latestIndexCandleDateFromQuote(indexQuote);
         els.marketStatus.textContent = `已用即時加權指數 snapshot 更新 ${quoteDate} 日K，close ${formatNumber(indexQuote.close, 0)}。`;
@@ -2668,13 +2674,17 @@ function patchLatestIndexCandleFromQuote(indexQuote) {
   if ((startDate && quoteDate < startDate) || (endDate && quoteDate > endDate)) return false;
 
   const candles = [...state.indexCandles];
+  const quoteOpen = firstNumber(indexQuote?.open);
+  const quoteHigh = firstNumber(indexQuote?.high, close);
+  const quoteLow = firstNumber(indexQuote?.low, close);
   const existingIndex = candles.findIndex((candle) => candle.time === quoteDate);
   if (existingIndex >= 0) {
     const current = candles[existingIndex];
     const next = {
       ...current,
-      high: Math.max(current.high, close),
-      low: Math.min(current.low, close),
+      open: Number.isFinite(quoteOpen) && quoteOpen > 0 ? quoteOpen : current.open,
+      high: Math.max(current.high, quoteHigh, close),
+      low: Math.min(current.low, quoteLow, close),
       close,
     };
     if (!isValidOhlc(next.open, next.high, next.low, next.close)) return false;
@@ -2690,7 +2700,13 @@ function patchLatestIndexCandleFromQuote(indexQuote) {
   } else {
     const last = candles.at(-1);
     if (last && quoteDate < last.time) return false;
-    candles.push({ time: quoteDate, open: close, high: close, low: close, close });
+    candles.push({
+      time: quoteDate,
+      open: Number.isFinite(quoteOpen) && quoteOpen > 0 ? quoteOpen : close,
+      high: Number.isFinite(quoteHigh) && quoteHigh > 0 ? Math.max(quoteHigh, close) : close,
+      low: Number.isFinite(quoteLow) && quoteLow > 0 ? Math.min(quoteLow, close) : close,
+      close,
+    });
   }
   state.indexCandles = candles.sort((a, b) => a.time.localeCompare(b.time));
   return true;
@@ -2710,11 +2726,11 @@ function normalizeTaiexIndicatorTimestamp(row) {
 }
 
 function normalizeDailyCandle(row) {
-  const time = normalizeDateValue(row.date || row.stock_date || row.Date);
-  const open = firstNumber(row.open, row.Open, row.open_price);
-  const high = firstNumber(row.max, row.high, row.High, row.high_price);
-  const low = firstNumber(row.min, row.low, row.Low, row.low_price);
-  const close = firstNumber(row.close, row.Close, row.close_price);
+  const time = normalizeDateValue(row?.time || row?.date || row?.stock_date || row?.Date);
+  const open = firstNumber(row?.open, row?.Open, row?.open_price, row?.openPrice);
+  const high = firstNumber(row?.max, row?.high, row?.High, row?.high_price, row?.highPrice);
+  const low = firstNumber(row?.min, row?.low, row?.Low, row?.low_price, row?.lowPrice);
+  const close = firstNumber(row?.close, row?.Close, row?.close_price, row?.closePrice, row?.lastPrice);
   if (!time || !isValidOhlc(open, high, low, close)) return null;
   return { time, open, high, low, close };
 }
@@ -2781,17 +2797,25 @@ function normalizeFuturesSnapshotRow(row) {
 }
 
 function normalizeIndexSnapshotRow(row) {
-  const stockId = String(row.stock_id || row.data_id || "").toUpperCase().trim();
+  const stockId = String(row.stock_id || row.symbol || row.data_id || "").toUpperCase().trim();
   const bid = firstNumber(row.buy_price, 0);
   const ask = firstNumber(row.sell_price, 0);
-  const close = firstNumber(row.close, row.TAIEX, bid && ask ? (bid + ask) / 2 : bid || ask);
+  const close = firstNumber(row.close, row.closePrice, row.lastPrice, row.TAIEX, bid && ask ? (bid + ask) / 2 : bid || ask);
+  const open = firstNumber(row.open, row.openPrice);
+  const high = firstNumber(row.high, row.highPrice, close);
+  const low = firstNumber(row.low, row.lowPrice, close);
   if (!Number.isFinite(close) || close <= 0) return null;
   return {
     stock_id: stockId,
+    name: row.name || "",
+    open,
+    high,
+    low,
     close,
     bid,
     ask,
     date: String(row.date || ""),
+    source: row.source || "",
   };
 }
 
@@ -2902,8 +2926,8 @@ function selectIndexQuote(rows) {
   return rows
     .filter((row) => row && row.close > 0)
     .sort((a, b) => {
-      const aIsTaiex = a.stock_id === "001" || a.stock_id === "TAIEX";
-      const bIsTaiex = b.stock_id === "001" || b.stock_id === "TAIEX";
+      const aIsTaiex = a.stock_id === "001" || a.stock_id === "TAIEX" || a.stock_id === "IX0001" || a.name === "發行量加權股價指數";
+      const bIsTaiex = b.stock_id === "001" || b.stock_id === "TAIEX" || b.stock_id === "IX0001" || b.name === "發行量加權股價指數";
       if (aIsTaiex !== bIsTaiex) return aIsTaiex ? -1 : 1;
       return String(b.date).localeCompare(String(a.date));
     })[0] || null;

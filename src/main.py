@@ -12,21 +12,28 @@ from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
+from zoneinfo import ZoneInfo
 
 import requests
 from dotenv import load_dotenv
 
 try:
     from .fugle_live import FugleLiveTQuoteService
+    from .fugle_live import load_env_token as load_fugle_token
 except ImportError:  # pragma: no cover - supports `python src/main.py`.
     from fugle_live import FugleLiveTQuoteService
+    from fugle_live import load_env_token as load_fugle_token
 
 
 ROOT = Path(__file__).resolve().parents[1]
 FINMIND_API_BASE = "https://api.finmindtrade.com/api/v4"
+FUGLE_STOCK_API_BASE = "https://api.fugle.tw/marketdata/v1.0/stock"
 QUOTE_REFRESH_SECONDS = 30
 FUTURES_DATA_IDS = ("TXF", "MXF", "MTX", "TMF")
 TAIEX_DATA_ID = "TAIEX"
+TAIEX_STOCK_ID = "TAIEX"
+TAIEX_FUGLE_NAME = "發行量加權股價指數"
+TAIPEI_TZ = ZoneInfo("Asia/Taipei")
 
 
 def env_flag(name: str, default: bool = False) -> bool:
@@ -61,9 +68,80 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+def taipei_today() -> str:
+    return datetime.now(TAIPEI_TZ).date().isoformat()
+
+
+def first_number(*values: Any) -> float | None:
+    for value in values:
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            continue
+        if parsed == parsed and parsed not in (float("inf"), float("-inf")):
+            return parsed
+    return None
+
+
+def nested_value(payload: dict[str, Any], *path: str) -> Any:
+    current: Any = payload
+    for key in path:
+        if not isinstance(current, dict):
+            return None
+        current = current.get(key)
+    return current
+
+
+def is_taiex_fugle_row(row: dict[str, Any]) -> bool:
+    name = str(row.get("name") or row.get("stockName") or "").strip()
+    symbol = str(row.get("symbol") or row.get("stock_id") or row.get("stockId") or "").upper().strip()
+    return name == TAIEX_FUGLE_NAME or symbol in {TAIEX_STOCK_ID, "001", "IX0001"}
+
+
+def fugle_row_date(row: dict[str, Any], fallback: str) -> str:
+    for key in ("date", "tradeDate", "tradingDate", "lastUpdated", "last_updated", "time"):
+        value = row.get(key)
+        if value:
+            normalized = normalize_date_text(value)
+            if is_iso_date(normalized):
+                return normalized
+    return fallback
+
+
+def normalize_fugle_taiex_row(row: dict[str, Any], trading_date: str) -> dict[str, Any]:
+    close = first_number(
+        row.get("closePrice"),
+        row.get("lastPrice"),
+        row.get("close"),
+        nested_value(row, "lastTrade", "price"),
+        row.get("referencePrice"),
+    )
+    open_price = first_number(row.get("openPrice"), row.get("open"), row.get("open_price"), close)
+    high = first_number(row.get("highPrice"), row.get("high"), row.get("high_price"), close, open_price)
+    low = first_number(row.get("lowPrice"), row.get("low"), row.get("low_price"), close, open_price)
+    if close is None or open_price is None or high is None or low is None:
+        raise RuntimeError("Fugle 加權指數 snapshot 缺少 OHLC 欄位。")
+    if min(open_price, high, low, close) <= 0:
+        raise RuntimeError("Fugle 加權指數 snapshot OHLC 不是有效正數。")
+    high = max(high, open_price, close)
+    low = min(low, open_price, close)
+    return {
+        "stock_id": TAIEX_STOCK_ID,
+        "symbol": row.get("symbol") or TAIEX_STOCK_ID,
+        "name": row.get("name") or TAIEX_FUGLE_NAME,
+        "date": fugle_row_date(row, trading_date),
+        "open": open_price,
+        "high": high,
+        "low": low,
+        "close": close,
+        "source": "fugle_stock_snapshot",
+    }
+
+
 class QuoteCache:
-    def __init__(self, token: str, refresh_seconds: int = QUOTE_REFRESH_SECONDS) -> None:
+    def __init__(self, token: str, fugle_token: str = "", refresh_seconds: int = QUOTE_REFRESH_SECONDS) -> None:
         self.token = token
+        self.fugle_token = fugle_token
         self.refresh_seconds = refresh_seconds
         self.lock = threading.Lock()
         self.refresh_lock = threading.Lock()
@@ -96,7 +174,7 @@ class QuoteCache:
         try:
             futures, futures_error = self._fetch_futures_snapshots()
             options = self._fetch_snapshot("taiwan_options_snapshot", {"data_id": "TXO"})
-            index, index_error = self._fetch_optional_snapshot("taiwan_stock_tick_snapshot", {"data_id": "001"})
+            index, index_error = self._fetch_index_snapshot()
             error = "；".join(filter(None, [futures_error, index_error]))
             payload = {
                 "ok": True,
@@ -150,6 +228,49 @@ class QuoteCache:
             raise RuntimeError(f"{endpoint} 回傳格式不是 list。")
         return data
 
+    def _fetch_fugle_stock_api(self, path: str, params: dict[str, str] | None = None) -> dict[str, Any]:
+        if not self.fugle_token:
+            raise RuntimeError("Fugle API token is not configured.")
+        response = requests.get(
+            f"{FUGLE_STOCK_API_BASE}/{path.lstrip('/')}",
+            params=params or {},
+            headers={"X-API-KEY": self.fugle_token},
+            timeout=15,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        if not isinstance(payload, dict):
+            raise RuntimeError("Fugle stock snapshot 回傳格式不是 dict。")
+        return payload
+
+    def _fetch_fugle_taiex_snapshot(self, trading_date: str = "") -> list[dict[str, Any]]:
+        payload = self._fetch_fugle_stock_api("snapshot/quotes/TSE")
+        data = payload.get("data") or []
+        if not isinstance(data, list):
+            raise RuntimeError("Fugle stock snapshot data 回傳格式不是 list。")
+        for row in data:
+            if not isinstance(row, dict):
+                continue
+            if is_taiex_fugle_row(row):
+                return [normalize_fugle_taiex_row(row, trading_date or taipei_today())]
+        raise RuntimeError("Fugle stock snapshot 查無發行量加權股價指數。")
+
+    def _fetch_fugle_taiex_candle(self, trading_date: str) -> dict[str, Any] | None:
+        rows = self._fetch_fugle_taiex_snapshot(trading_date)
+        return rows[0] if rows else None
+
+    def _fetch_index_snapshot(self) -> tuple[list[dict[str, Any]], str]:
+        fugle_error = ""
+        try:
+            rows = self._fetch_fugle_taiex_snapshot()
+            if rows:
+                return rows, ""
+        except Exception as error:  # noqa: BLE001 - fall back to the older FinMind tick snapshot.
+            fugle_error = f"Fugle 加權指數 snapshot: {sanitize_error(error)}"
+
+        finmind_rows, finmind_error = self._fetch_optional_snapshot("taiwan_stock_tick_snapshot", {"data_id": "001"})
+        return finmind_rows, "；".join(filter(None, [fugle_error, finmind_error]))
+
     def fetch_index_candles(self, start_date: str, end_date: str) -> dict[str, Any]:
         trading_dates = self._fetch_data(
             "TaiwanStockTradingDate",
@@ -161,10 +282,12 @@ class QuoteCache:
         )
         latest_date = latest_trading_date(trading_dates, start_date, end_date)
         latest_rows: list[dict[str, Any]] = []
+        latest_candle: dict[str, Any] | None = None
         latest_error = ""
+        latest_source = "fugle_stock_snapshot"
         if latest_date:
             try:
-                latest_rows = self._fetch_data("TaiwanVariousIndicators5Seconds", {"start_date": latest_date})
+                latest_candle = self._fetch_fugle_taiex_candle(latest_date)
             except Exception as error:  # noqa: BLE001 - historical OHLC can still render without intraday rows.
                 latest_error = sanitize_error(error)
 
@@ -176,6 +299,8 @@ class QuoteCache:
             "trading_dates": trading_dates,
             "daily_candles": daily_candles,
             "latest_rows": latest_rows,
+            "latest_candle": latest_candle,
+            "latest_source": latest_source,
             "latest_error": latest_error,
         }
 
@@ -246,8 +371,8 @@ def latest_trading_date(rows: list[dict[str, Any]], start_date: str, end_date: s
     return dates[-1] if dates else ""
 
 
-QUOTE_CACHE = QuoteCache(load_env_token())
-FUGLE_TQUOTE = FugleLiveTQuoteService(load_env_value("FUGLE_TOKEN"))
+QUOTE_CACHE = QuoteCache(load_env_token(), fugle_token=load_fugle_token())
+FUGLE_TQUOTE = FugleLiveTQuoteService(load_fugle_token())
 ALLOW_FORCE_QUOTE_REFRESH = env_flag("ALLOW_FORCE_QUOTE_REFRESH")
 
 

@@ -152,9 +152,6 @@ class DemoState:
                 self.future_1m_error = ""
 
     def record_vix_sample_unlocked(self) -> None:
-        current = time.monotonic()
-        if current - self.last_vix_sample_monotonic < VIX_SAMPLE_INTERVAL_SECONDS:
-            return
         years = years_to_expiry(self.settlement_date)
         rows = t_quote_rows(
             self.selected_strikes,
@@ -166,11 +163,17 @@ class DemoState:
             years,
         )
         vix = quick_vix_from_rows(rows, self.future_price)
+        self.append_vix_sample_unlocked(vix)
+
+    def append_vix_sample_unlocked(self, vix: dict[str, Any] | None, sample_time: str | None = None) -> None:
         if not vix:
+            return
+        current = time.monotonic()
+        if current - self.last_vix_sample_monotonic < VIX_SAMPLE_INTERVAL_SECONDS:
             return
         self.last_vix_sample_monotonic = current
         self.vix_series.append({
-            "time": now_text(),
+            "time": sample_time or now_text(),
             "value": vix["value"],
             "sample_count": vix["sample_count"],
             "call_count": vix["call_count"],
@@ -192,6 +195,7 @@ class DemoState:
                 years,
             )
             vix = quick_vix_from_rows(rows, self.future_price)
+            self.append_vix_sample_unlocked(vix)
             return {
                 "status": self.status,
                 "authenticated": self.authenticated,
@@ -291,6 +295,7 @@ class FugleLiveTQuoteService:
         legacy = self.snapshot()
         live_snapshot = quote_snapshot_from_tquote_payload(legacy, source_type="fugle_live")
         if snapshot_has_usable_quotes(live_snapshot):
+            self._fill_live_snapshot_vix_from_rest(live_snapshot)
             self.snapshot_store.write(live_snapshot)
             return live_snapshot
 
@@ -306,6 +311,18 @@ class FugleLiveTQuoteService:
         if cached:
             return cached
         return live_snapshot
+
+    def _fill_live_snapshot_vix_from_rest(self, snapshot: dict[str, Any]) -> None:
+        if snapshot.get("vix") and len(snapshot.get("vix_series") or []) >= 2:
+            return
+        rest_snapshot = self._rest_quote_snapshot_if_due()
+        if not rest_snapshot or not rest_snapshot.get("vix"):
+            return
+        snapshot["vix"] = rest_snapshot["vix"]
+        snapshot["vix_series"] = rest_snapshot.get("vix_series") or snapshot.get("vix_series") or []
+        metadata = snapshot.setdefault("metadata", {})
+        if isinstance(metadata, dict):
+            metadata["vix_source"] = "fugle_rest_probe"
 
     def futures_1m_snapshot(self) -> dict[str, Any]:
         if not self.started:
@@ -343,6 +360,7 @@ class FugleLiveTQuoteService:
         for after_hours in unique_bool_order(self.after_hours):
             try:
                 payload = fugle_rest_tquote_payload(self.token, self.contract, self.strike_count, after_hours)
+                self._record_rest_vix_sample(payload)
                 snapshot = quote_snapshot_from_tquote_payload(payload, source_type="fugle_rest_probe")
                 if snapshot_has_usable_quotes(snapshot):
                     return snapshot
@@ -350,6 +368,14 @@ class FugleLiveTQuoteService:
             except Exception as error:  # noqa: BLE001 - try the other session.
                 errors.append(f"{'afterhours' if after_hours else 'regular'}: {error}")
         raise RuntimeError("; ".join(errors))
+
+    def _record_rest_vix_sample(self, payload: dict[str, Any]) -> None:
+        with self.state.lock:
+            self.state.append_vix_sample_unlocked(
+                payload.get("vix"),
+                sample_time=payload.get("last_aggregate_at") or payload.get("last_event_at"),
+            )
+            payload["vix_series"] = list(self.state.vix_series)
 
     def _refresh_futures_1m_if_due(self, force: bool = False) -> None:
         if not self.token or not self.state.future_symbol:
