@@ -135,6 +135,10 @@ window.dashboardPreview = (() => {
     const cell = row.querySelector(".strike-cell");
     wrap.scrollLeft += cell.getBoundingClientRect().left - rect.left - (wrap.clientWidth - cell.offsetWidth) / 2;
     if (explicit) {
+      const target = row.getBoundingClientRect();
+      if (target.top < 0 || target.bottom > window.innerHeight) {
+        window.scrollBy(0, rect.top - Math.min(140, window.innerHeight * 0.16));
+      }
       document.querySelector("#tQuoteBody .selected-strike")?.classList.remove("selected-strike");
       selectedStrike = strike;
       document.querySelector("#strikeMessage").textContent = `已定位 ${formatNumber(strike, 0)}`;
@@ -178,6 +182,7 @@ window.dashboardPreview = (() => {
 
   document.addEventListener("DOMContentLoaded", () => {
     document.title = "滿版測試 · OP3V 月選擇權部位監控";
+    document.getElementById("indexChart").dataset.previewMessage = "正在載入加權指數日線…";
     const grid = document.querySelector(".dashboard-grid");
     for (const panel of ["market", "t-quote", "positions", "payoff", "option-chain", "regime", "calendar"]) {
       grid.append(grid.querySelector(`.${panel}-panel`));

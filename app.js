@@ -2442,10 +2442,14 @@ async function fetchIndexCandles(options = {}) {
     const latestWarning = !latestCandle && latestFetchError ? `；即時 OHLC 警告：${latestFetchError}` : "";
     const cycleText = queryEndDate < endDate ? `，結束日期 ${endDate} 尚未到，資料目前更新至 ${queryEndDate}` : "";
     els.marketStatus.textContent = `已更新 ${candles.length} 根加權指數日線（${sourceLabel}，${startDate} ~ ${endDate}）${cycleText}${droppedText}${latestText}${latestWarning}。`;
+    if (window.dashboardPreview) delete els.indexChart.dataset.previewMessage;
     renderAll({ indexChart: true });
   } catch (error) {
     const fallbackText = options.auto ? "，目前保留示範日線" : "";
     els.marketStatus.textContent = `FinMind 抓取失敗：${error.message}${fallbackText}`;
+    if (window.dashboardPreview && els.indexChart.dataset.previewMessage) {
+      els.indexChart.dataset.previewMessage = "日線載入失敗，請點「抓取日線」重試";
+    }
   } finally {
     els.fetchIndexBtn.disabled = false;
     state.isFetchingIndex = false;

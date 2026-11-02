@@ -46,7 +46,13 @@ h1 { font-size: clamp(18px, 1.4vw, 24px); }
 .chart-score { height: clamp(70px, 9vh, 95px); }
 .chart-delta { height: clamp(60px, 8vh, 86px); }
 .chart-stack { gap: 4px; }
+#indexChart[data-preview-message] { position: relative; }
+#indexChart[data-preview-message]::after {
+  content: attr(data-preview-message); position: absolute; inset: 0; z-index: 4;
+  display: grid; place-items: center; background: var(--surface-alt); color: var(--muted);
+}
 .event-lane { height: 22px; }
+.event-marker { top: 0; }
 .chart-area { border-radius: 3px; }
 .market-panel .status-line { margin: 4px 0 0; }
 .market-panel #marketIndexPane > .provider-note { display: block; text-align: right; }
