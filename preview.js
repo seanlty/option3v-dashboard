@@ -183,10 +183,6 @@ window.dashboardPreview = (() => {
   document.addEventListener("DOMContentLoaded", () => {
     document.title = "滿版測試 · OP3V 月選擇權部位監控";
     document.getElementById("indexChart").dataset.previewMessage = "正在載入加權指數日線…";
-    const grid = document.querySelector(".dashboard-grid");
-    for (const panel of ["market", "t-quote", "positions", "payoff", "option-chain", "regime", "calendar"]) {
-      grid.append(grid.querySelector(`.${panel}-panel`));
-    }
     document.querySelector(".eyebrow").textContent = "OP3V  /  版面測試";
     const heading = document.querySelector("h1");
     heading.textContent = "月選擇權部位監控";

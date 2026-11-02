@@ -22,11 +22,8 @@ h1 { font-size: clamp(18px, 1.4vw, 24px); }
 .market-strip strong { font-size: 15px; }
 .preview-nav { display: flex; gap: 12px; margin-left: auto; }
 .preview-nav a { font-size: 13px; color: #106a66; text-underline-offset: 3px; }
-.dashboard-grid { grid-template-columns: minmax(0, 2fr) minmax(0, 1fr); gap: 12px; }
+.dashboard-grid { gap: 12px; }
 .panel { padding: 10px 12px; margin: 0; }
-.dashboard-grid > .panel { grid-column: 1 / -1; grid-row: auto; }
-.dashboard-grid > .regime-panel { grid-column: 1; }
-.dashboard-grid > .calendar-panel { grid-column: 2; }
 .panel-header { margin-bottom: 8px; }
 .market-panel .panel-header { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 14px; }
 .market-panel .panel-header > :last-child { margin-top: 0; }
@@ -90,8 +87,7 @@ h1 { font-size: clamp(18px, 1.4vw, 24px); }
   .app-shell { padding: 6px 8px 15px; }
   .topbar { gap: 5px 12px; }
   .topbar .market-strip { order: 3; width: 100%; }
-  .dashboard-grid { grid-template-columns: minmax(0, 1fr); gap: 8px; }
-  .dashboard-grid > .panel { grid-column: 1; }
+  .dashboard-grid { gap: 8px; }
   .panel { padding: 8px; }
   .market-panel .data-controls { width: 100%; }
   .market-panel .data-controls label { flex-direction: column; align-items: flex-start; }
