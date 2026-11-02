@@ -707,7 +707,7 @@ def years_to_expiry(settlement_date: str) -> float:
         expiry_date = datetime.strptime(settlement_date, "%Y-%m-%d").date()
     except ValueError:
         return 1 / 365
-    now = datetime.now().astimezone()
+    now = taipei_now()
     expiry = datetime.combine(expiry_date, datetime_time(hour=13, minute=30), tzinfo=now.tzinfo)
     seconds = max((expiry - now).total_seconds(), 60)
     return seconds / (365 * 24 * 60 * 60)

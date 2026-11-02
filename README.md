@@ -55,6 +55,8 @@ http://127.0.0.1:8765/index.html
 
 ## Railway 正式環境
 
+[開啟 OP3V 月選擇權部位監控](https://option-dashboard-production.up.railway.app/)
+
 Railway 的 `Option-Dashboard` 專案使用 `production` 環境，服務連接 `seanlty/option3v-dashboard` 的 `main` 分支。`railway.toml` 指定使用 Railpack 建置、以 `python -u src/main.py` 啟動，並用 `/index.html` 做健康檢查。服務監聽 `0.0.0.0` 和 Railway 提供的 `PORT`。
 
 在服務的 Variables 設定 `FINMIND_TOKEN` 與 `FUGLE_TOKEN` 供後端取得行情。正式環境使用記憶體快取，重新啟動時會重新抓取行情。使用者部位存於各自瀏覽器的 `localStorage`，網域變更時，可在新站的「部位明細」匯入先前匯出的 JSON 備份。

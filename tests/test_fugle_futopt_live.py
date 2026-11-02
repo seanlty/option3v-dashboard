@@ -8,12 +8,14 @@ import pytest
 import requests
 from dotenv import load_dotenv
 
+from src.fugle_live import front_month_contract, future_symbol_for_contract, settlement_date_for_contract
 
 ROOT = Path(__file__).resolve().parents[1]
 BASE_URL = "https://api.fugle.tw/marketdata/v1.0/futopt"
 WS_URL = "wss://api.fugle.tw/marketdata/v1.0/futopt/streaming"
-CONTRACT = "202607"
-SETTLEMENT_DATE = "2026-07-15"
+CONTRACT = front_month_contract()
+FUTURE_SYMBOL = future_symbol_for_contract(CONTRACT)
+SETTLEMENT_DATE = settlement_date_for_contract(CONTRACT)
 
 
 def load_env_token() -> str:
@@ -56,7 +58,7 @@ def parse_txo_symbol(symbol: str):
     }
 
 
-def txo_202607_rows(token: str):
+def front_month_rows(token: str):
     payload = fugle_get(
         "/intraday/tickers",
         token,
@@ -86,15 +88,15 @@ def center_symbols(rows, center_price: float, strike_count: int = 3):
     ]
 
 
-def test_fugle_rest_txo_202607_quote_smoke():
+def test_fugle_rest_front_month_quote_smoke():
     token = fugle_token()
 
-    future = fugle_get("/intraday/quote/TXFG6", token)
+    future = fugle_get(f"/intraday/quote/{FUTURE_SYMBOL}", token)
     center_price = future.get("lastPrice") or future.get("closePrice")
-    assert future["symbol"] == "TXFG6"
+    assert future["symbol"] == FUTURE_SYMBOL
     assert center_price and center_price > 0
 
-    rows = txo_202607_rows(token)
+    rows = front_month_rows(token)
     assert len(rows) > 0
 
     symbols = center_symbols(rows, center_price, strike_count=2)
@@ -105,13 +107,13 @@ def test_fugle_rest_txo_202607_quote_smoke():
     assert any((quote.get("lastTrade") or {}).get("bid") is not None for quote in quotes)
 
 
-def test_fugle_websocket_books_txo_202607_smoke():
+def test_fugle_websocket_books_front_month_smoke():
     token = fugle_token()
     websockets = pytest.importorskip("websockets")
 
-    future = fugle_get("/intraday/quote/TXFG6", token)
+    future = fugle_get(f"/intraday/quote/{FUTURE_SYMBOL}", token)
     center_price = future.get("lastPrice") or future.get("closePrice")
-    symbols = center_symbols(txo_202607_rows(token), center_price, strike_count=2)[:4]
+    symbols = center_symbols(front_month_rows(token), center_price, strike_count=2)[:4]
     assert symbols
 
     async def probe():
