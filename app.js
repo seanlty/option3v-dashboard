@@ -1,5 +1,5 @@
 const POINT_VALUE = 50;
-const STORAGE_KEY = "txo-dashboard-positions-v1";
+const STORAGE_KEY = window.dashboardPreview ? "txo-dashboard-preview-positions-v1" : "txo-dashboard-positions-v1";
 const PORTFOLIO_EXPORT_VERSION = 1;
 const MAX_IMPORTED_POSITIONS = 500;
 const FINMIND_URL = "https://api.finmindtrade.com/api/v4/data";
@@ -1828,7 +1828,8 @@ async function fetchFugleTQuoteSnapshot() {
 }
 
 function applyFugleTQuotePayload(payload) {
-  state.fugleTQuote = normalizeTQuotePayload(payload);
+  const snapshot = normalizeTQuotePayload(payload);
+  state.fugleTQuote = window.dashboardPreview ? window.dashboardPreview.merge(snapshot) : snapshot;
   renderTQuoteTable();
   drawTQuoteVixChart();
 }
@@ -1935,11 +1936,12 @@ function renderTQuoteTable() {
     return `
       <tr class="${atmClass}">
         ${renderFugleCallCells(call, row.strike, contract)}
-        <td class="strike-cell">${formatNumber(row.strike, 0)}</td>
+        <td class="strike-cell">${formatNumber(row.strike, 0)}${window.dashboardPreview?.sources(row) || ""}</td>
         ${renderFuglePutCells(put, row.strike, contract)}
       </tr>
     `;
   }).join("");
+  window.dashboardPreview?.afterRender(rows, atm.strike);
 }
 
 function renderFugleCallCells(leg, strike, contract) {

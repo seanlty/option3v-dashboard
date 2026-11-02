@@ -75,6 +75,7 @@ class DemoState:
     future_price: float | None = None
     risk_free_rate: float = DEFAULT_RATE
     selected_symbols: list[str] = field(default_factory=list)
+    listed_symbols: list[str] = field(default_factory=list)
     selected_strikes: list[int] = field(default_factory=list)
     books: dict[str, dict[str, Any]] = field(default_factory=dict)
     aggregates: dict[str, dict[str, Any]] = field(default_factory=dict)
@@ -687,6 +688,7 @@ def prepare_universe(token: str, contract: str, strike_count: int, after_hours: 
         "settlement_date": settlement_date,
         "future_symbol": future_symbol,
         "future_price": future_price,
+        "listed_symbols": [row["symbol"] for row in rows],
         "selected_strikes": selected_strikes,
         "selected_symbols": selected_symbols,
         "symbol_meta": symbol_meta,

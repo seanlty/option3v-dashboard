@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import os
 import threading
 import time
 from datetime import datetime, timezone
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+from io import BytesIO
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
@@ -18,9 +20,11 @@ import requests
 from dotenv import load_dotenv
 
 try:
+    from .preview_quotes import MAX_FOCUS_STRIKES, build_catalog, stream_focus
     from .fugle_live import FugleLiveTQuoteService
     from .fugle_live import load_env_token as load_fugle_token
 except ImportError:  # pragma: no cover - supports `python src/main.py`.
+    from preview_quotes import MAX_FOCUS_STRIKES, build_catalog, stream_focus
     from fugle_live import FugleLiveTQuoteService
     from fugle_live import load_env_token as load_fugle_token
 
@@ -388,6 +392,17 @@ class DashboardHandler(SimpleHTTPRequestHandler):
 
     def do_GET(self) -> None:  # noqa: N802 - stdlib handler API.
         parsed = urlparse(self.path)
+        if parsed.path == "/api/preview/chain":
+            self._send_json(build_catalog(FUGLE_TQUOTE, QUOTE_CACHE.snapshot()))
+            return
+        if parsed.path == "/api/preview/focus-events":
+            query = parse_qs(parsed.query)
+            values = query.get("strikes", [""])[0].split(",")
+            if len(values) > MAX_FOCUS_STRIKES or not all(v.isascii() and v.isdecimal() and len(v) <= 6 for v in values):
+                self.send_error(400)
+                return
+            self._send_focus_stream(query.get("contract", [""])[0], {int(v) for v in values})
+            return
         if parsed.path == "/api/latest-quotes":
             query = parse_qs(parsed.query)
             force = ALLOW_FORCE_QUOTE_REFRESH and query.get("force", ["0"])[0] == "1"
@@ -427,9 +442,23 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         super().do_GET()
 
     def send_head(self):
+        if urlparse(self.path).path in {"/preview", "/preview/"}:
+            template = (ROOT / "index.html").read_text(encoding="utf-8")
+            page = template.replace("<head>", '<head><base href="/">', 1).replace(
+                "<!-- preview-assets -->",
+                '<link rel="stylesheet" href="/preview.css">'
+                '<script defer src="/preview.js"></script>',
+            ).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(page)))
+            self.end_headers()
+            return BytesIO(page)
         # GET and HEAD may only serve the dashboard's public assets.
         if urlparse(self.path).path not in {
             "/", "/index.html", "/app.js", "/styles.css", "/data/settlement_dates.json",
+            "/preview.js", "/preview.css",
         }:
             self.send_error(404)
             return None
@@ -460,6 +489,26 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                 time.sleep(1)
             except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
                 break
+
+    def _send_focus_stream(self, contract: str, strikes: set[int]) -> None:
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+
+        def emit(data):
+            self.wfile.write(f"data: {json.dumps(data)}\n\n".encode())
+            self.wfile.flush()
+
+        try:
+            asyncio.run(stream_focus(FUGLE_TQUOTE, contract, strikes, emit))
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            pass
+        except Exception:  # Provider timeouts or unavailable capacity leave the snapshot in place.
+            try:
+                emit({"status": "snapshot"})
+            except OSError:
+                pass
 
     def _send_quote_snapshot_event_stream(self) -> None:
         self.send_response(200)
