@@ -489,7 +489,7 @@ def regular_session_state(now: datetime | None = None) -> dict[str, str]:
 
 
 def front_month_contract() -> str:
-    today = datetime.now().date()
+    today = taipei_now().date()
     dates_path = ROOT / "data" / "settlement_dates.json"
     if dates_path.exists():
         try:

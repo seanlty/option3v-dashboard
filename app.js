@@ -2451,10 +2451,10 @@ async function fetchIndexCandles(options = {}) {
 }
 
 async function localIndexCandleData(startDate, endDate) {
-  const urls = [
-    new URL("/api/index-candles", window.location.origin),
-    new URL("http://127.0.0.1:8766/api/index-candles"),
-  ];
+  const urls = [new URL("/api/index-candles", window.location.origin)];
+  if (["localhost", "127.0.0.1"].includes(window.location.hostname)) {
+    urls.push(new URL("http://127.0.0.1:8766/api/index-candles"));
+  }
   urls.forEach((url) => {
     url.searchParams.set("start_date", startDate);
     url.searchParams.set("end_date", endDate);

@@ -53,13 +53,11 @@ http://127.0.0.1:8765/index.html
 
 第一階段維持 local-first，不接資料庫。使用者部位只存在瀏覽器 `localStorage`，並可從部位明細區匯出/匯入 JSON 檔做本機備份或跨裝置搬移；payoff、Greeks 與風險摘要都在前端計算，不會把部位送到後端。
 
-部署到 Zeabur 時可直接啟動 Python service：
+## Railway 正式環境
 
-```powershell
-python src\main.py
-```
+Railway 的 `Option-Dashboard` 專案使用 `production` 環境，服務連接 `seanlty/option3v-dashboard` 的 `main` 分支。`railway.toml` 指定使用 Railpack 建置、以 `python -u src/main.py` 啟動，並用 `/index.html` 做健康檢查。服務監聽 `0.0.0.0` 和 Railway 提供的 `PORT`。
 
-服務會讀取平台提供的 `PORT`，並預設綁定 `0.0.0.0`。`FINMIND_TOKEN` 與 `FUGLE_TOKEN` 會先讀取 Zeabur 環境變數，沒有時才使用本機 `.env`。第一階段不需要 Zeabur PostgreSQL、Redis 或 Volume；行情 snapshot 預設使用記憶體快取，避免多人連線時產生 server disk I/O。若要在開發環境保留 Fugle snapshot 檔案，可設定 `FUGLE_SNAPSHOT_DISK_CACHE=1`。
+在服務的 Variables 設定 `FINMIND_TOKEN` 與 `FUGLE_TOKEN` 供後端取得行情。正式環境使用記憶體快取，重新啟動時會重新抓取行情。使用者部位存於各自瀏覽器的 `localStorage`，網域變更時，可在新站的「部位明細」匯入先前匯出的 JSON 備份。
 
 ## 已完成
 
@@ -87,5 +85,5 @@ python src\main.py
 
 ## 下一步建議
 
-- 需要登入、跨裝置雲端同步、多人共編或版本歷史時，再加入 Zeabur PostgreSQL 儲存 portfolio JSON。
+- 需要登入、跨裝置雲端同步、多人共編或版本歷史時，再加入 PostgreSQL 儲存 portfolio JSON。
 - 將即時選擇權報價抽象成 provider，後續可換 TAIFEX、券商 API 或 FinMind sponsor endpoint。

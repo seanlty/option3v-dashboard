@@ -424,10 +424,16 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             except Exception as error:  # noqa: BLE001 - return a frontend-friendly JSON error.
                 self._send_json({"ok": False, "error": sanitize_error(error)})
             return
-        if parsed.path == "/.env":
-            self.send_error(404)
-            return
         super().do_GET()
+
+    def send_head(self):
+        # GET and HEAD may only serve the dashboard's public assets.
+        if urlparse(self.path).path not in {
+            "/", "/index.html", "/app.js", "/styles.css", "/data/settlement_dates.json",
+        }:
+            self.send_error(404)
+            return None
+        return super().send_head()
 
     def _send_json(self, payload: dict[str, Any]) -> None:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")

@@ -1,7 +1,32 @@
 import os
+import threading
+from contextlib import closing
+from http.client import HTTPConnection
+from http.server import ThreadingHTTPServer
 
 from src import fugle_live
 from src import main as main_module
+
+
+def test_dashboard_only_serves_public_assets(tmp_path, monkeypatch):
+    (tmp_path / "index.html").write_text("dashboard", encoding="utf-8")
+    (tmp_path / ".env").write_text("private", encoding="utf-8")
+    monkeypatch.setattr(main_module, "ROOT", tmp_path)
+    with ThreadingHTTPServer(("127.0.0.1", 0), main_module.DashboardHandler) as server:
+        thread = threading.Thread(target=server.serve_forever)
+        thread.start()
+        try:
+            for method in ("GET", "HEAD"):
+                for path, expected in (
+                    ("/", 200), ("/index.html?v=1", 200),
+                    ("/.env", 404), ("/%2eenv", 404), ("/data/", 404),
+                ):
+                    with closing(HTTPConnection(*server.server_address, timeout=5)) as client:
+                        client.request(method, path)
+                        assert client.getresponse().status == expected
+        finally:
+            server.shutdown()
+            thread.join()
 
 
 def test_load_env_value_prefers_os_environ(monkeypatch, tmp_path):

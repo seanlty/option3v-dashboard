@@ -1,0 +1,7 @@
+[build]
+builder = "RAILPACK"
+
+[deploy]
+startCommand = "python -u src/main.py"
+healthcheckPath = "/index.html"
+healthcheckTimeout = 120
